@@ -22,13 +22,14 @@ main{max-width:1000px;margin:0 auto;padding:1.2rem}
 #paper{position:relative;padding:1rem min(4vw,2.5rem) 6rem;min-height:60vh}#paper.pdf{padding:.5rem 0 6rem}
 .ed{outline:0;font:1.05rem/1.75 Georgia,"Times New Roman",serif;min-height:55vh}
 .ln[data-t=i]{padding-left:0;margin:.5em 0}
-.im{position:relative;display:inline-block;max-width:100%;line-height:0;touch-action:none;user-select:none;-webkit-user-select:none}
+.im{position:relative;display:inline-block;max-width:100%;line-height:0;touch-action:auto;user-select:none;-webkit-user-select:none}
 #ed.study .im{touch-action:auto}.im img{max-width:100%;height:auto;display:block;border-radius:4px}
 .im .x{position:absolute;top:4px;right:4px;display:none;line-height:1;padding:.15rem .5rem;background:var(--pp)}
-#ed:not(.study) .im{cursor:crosshair}#ed:not(.study) .im .x{display:block}
+#ed.drawing .im{cursor:crosshair;touch-action:none}#ed.drawing .im img{outline:2px dashed var(--mut)}#ed:not(.study) .im .x{display:block}
 .cur{position:absolute;background:rgba(140,130,100,.3);border:1px dashed var(--mut);scroll-margin-bottom:110px}
 .cur[data-s=r]{background:rgba(205,95,75,.3)}.cur[data-s=l]{background:rgba(95,150,80,.3)}
-.study .cur{border:0;cursor:pointer;background:#e1dac7}.study .cur[data-s=r]{background:#ecccc3}.study .cur[data-s=l]{background:#cfe0c7}
+.cx{position:absolute;top:2px;right:2px;display:none;line-height:1;padding:0 .35rem;font-size:.85rem;background:var(--pp)}#ed:not(.study) .cur .cx{display:block}
+.study .cur{z-index:2;border:0;cursor:pointer;background:#e1dac7}.study .cur[data-s=r]{background:#ecccc3}.study .cur[data-s=l]{background:#cfe0c7}
 .study .cur.open{background:rgba(140,130,100,.15)}.study .cur.open[data-s=r]{background:rgba(205,95,75,.18)}.study .cur.open[data-s=l]{background:rgba(95,150,80,.18)}
 .study .cur.na{background:transparent;pointer-events:none}
 .cm{font-size:.85em;font-style:italic;color:var(--mut);margin-left:.5em}.cm::before{content:"✎ "}
@@ -73,7 +74,7 @@ dialog input{border:1px solid var(--ln);border-radius:8px;background:var(--pp);c
 <main id="home"><div class="bar"><button id="nf">+ Carpeta</button><button id="nd">+ Documento</button><label class="btn">Importar PDF<input id="pdfIn" type="file" accept="application/pdf" hidden></label></div><div id="grid"></div></main>
 <main id="docv" hidden>
 <div class="tb"><input id="dname" aria-label="Nombre">
-<button id="hs">Ocultar selección</button><button id="bi">Imagen</button><input id="imgIn" type="file" accept="image/*" hidden>
+<button id="hs">Ocultar selección</button><button id="bi">Imagen</button><button id="bc" title="Activa y arrastra sobre una imagen para tapar una zona">Cortina</button><input id="imgIn" type="file" accept="image/*" hidden>
 <select id="sf" hidden><option value="all">Estudiar todas</option><option value="new">Solo no aprendidas</option><option value="learned">Solo aprendidas</option></select><button id="br" hidden>Reiniciar progreso</button>
 <button id="tm">Estudiar</button></div>
 <div id="paper"><div id="ed" class="ed"></div><div id="pages" hidden></div>
@@ -262,31 +263,32 @@ function addImage(f){if(!f||!f.type.startsWith('image/'))return toast('Archivo n
   if(ref&&ref.dataset.t==='e'&&isEmpty(ref))ref.replaceWith(L);else if(ref)ref.after(L);else ed.append(L);
   const N=mk('e',0);L.after(N);put(N);flush();toast('Imagen añadida')};
  im.onerror=()=>toast('No se pudo leer la imagen');im.src=u}
-let drag=null;
-ed.addEventListener('pointerdown',e=>{if(mode!=='edit')return;if(e.target.closest('.x'))return;const im=e.target.closest('.im');if(!im)return;e.preventDefault();
+let drag=null,curtain=false;
+$('#bc').onclick=()=>{curtain=!curtain;$('#bc').classList.toggle('on',curtain);ed.classList.toggle('drawing',curtain);if(curtain)toast('Arrastra sobre una imagen para tapar una zona')};
+ed.addEventListener('pointerdown',e=>{if(mode!=='edit'||!curtain)return;if(e.target.closest('.x,.cx'))return;const im=e.target.closest('.im');if(!im)return;e.preventDefault();
  drag={im,b:im.getBoundingClientRect(),x0:e.clientX,y0:e.clientY,on:e.target.closest('.cur'),el:null};try{im.setPointerCapture(e.pointerId)}catch(_){}});
 ed.addEventListener('pointermove',e=>{if(!drag)return;const b=drag.b,cl=v=>Math.max(0,Math.min(100,v));
- if(!drag.el){if(Math.abs(e.clientX-drag.x0)+Math.abs(e.clientY-drag.y0)<6)return;drag.el=document.createElement('div');drag.el.className='cur';drag.el.dataset.id=uid();drag.im.append(drag.el)}
+ if(!drag.el){if(Math.abs(e.clientX-drag.x0)+Math.abs(e.clientY-drag.y0)<6)return;drag.el=document.createElement('div');drag.el.className='cur';drag.el.dataset.id=uid();drag.el.innerHTML='<button class="cx">×</button>';drag.im.append(drag.el)}
  const x1=cl((Math.min(drag.x0,e.clientX)-b.left)/b.width*100),x2=cl((Math.max(drag.x0,e.clientX)-b.left)/b.width*100),
   y1=cl((Math.min(drag.y0,e.clientY)-b.top)/b.height*100),y2=cl((Math.max(drag.y0,e.clientY)-b.top)/b.height*100);
  drag.el.style.cssText=`left:${x1}%;top:${y1}%;width:${x2-x1}%;height:${y2-y1}%`});
 function endDrag(e){if(!drag)return;const d=drag;drag=null;
- if(d.el){if(parseFloat(d.el.style.width)<2||parseFloat(d.el.style.height)<2)d.el.remove();else{paint();flush()}}
- else if(d.on&&Math.abs(e.clientX-d.x0)+Math.abs(e.clientY-d.y0)<6){const cu=d.on;sure('¿Quitar esta cortina?',()=>{cu.remove();flush()},'Quitar')}}
+ if(d.el){if(parseFloat(d.el.style.width)<2||parseFloat(d.el.style.height)<2)d.el.remove();else{paint();flush()}}}
 ed.addEventListener('pointerup',endDrag);ed.addEventListener('pointercancel',endDrag);
 ed.addEventListener('click',e=>{const x=e.target.closest('.x');if(mode!=='edit'||!x)return;const L=x.closest('.ln');sure('¿Quitar esta imagen?',()=>{L.remove();norm();flush()},'Quitar')});
+ed.addEventListener('click',e=>{const x=e.target.closest('.cx');if(mode!=='edit'||!x)return;const c=x.closest('.cur');sure('¿Quitar esta cortina?',()=>{c.remove();flush()},'Quitar')});
 // ---- DOCUMENTO / MODOS ----
 async function openDoc(id){doc=S.items.find(i=>i.id===id);if(!doc)return;flt='all';$('#sf').value='all';
  $('#home').hidden=true;$('#docv').hidden=false;$('#dname').value=doc.name;$('#paper').classList.toggle('pdf',doc.type==='pdf');
  const f=vf().find(x=>x.id===doc.folder);$('#crumb').textContent=f?'/ '+f.name:'';$('#crumb').className=f?'lnk':'';
- if(doc.type==='pdf'){setMode('edit');await loadPdf()}else{ed.innerHTML=doc.html||'';norm();setMode('edit')}}
+ if(doc.type==='pdf'){setMode('edit');await loadPdf()}else{ed.innerHTML=doc.html||'';norm();ed.querySelectorAll('.cur').forEach(c=>{if(!c.querySelector('.cx'))c.insertAdjacentHTML('beforeend','<button class="cx">×</button>')});setMode('edit')}}
 $('#crumb').onclick=()=>{if(doc&&doc.folder){cur=doc.folder;home()}};
 $('#dname').onchange=e=>{if(doc&&e.target.value.trim()){doc.name=e.target.value.trim();doc.updated=Date.now();persist()}};
 function setMode(m){mode=m;hideBar();document.querySelectorAll('.card.open,.pc.open,.cur.open').forEach(c=>c.classList.remove('open'));
  const pdf=doc.type==='pdf';ed.hidden=pdf;$('#pages').hidden=!pdf;
  const pl='plaintext-only';ed.contentEditable=pl;if(ed.contentEditable!==pl)ed.contentEditable='true';if(m==='study')ed.contentEditable='false';
  ed.classList.toggle('study',m==='study');$('#pages').classList.toggle('study',m==='study');
- $('#tm').textContent=m==='study'?'Editar':'Estudiar';$('#hs').hidden=m==='study';$('#bi').hidden=m==='study'||pdf;$('#sf').hidden=m!=='study';$('#br').hidden=m!=='study';paint()}
+ $('#tm').textContent=m==='study'?'Editar':'Estudiar';$('#hs').hidden=m==='study';$('#bi').hidden=m==='study'||pdf;$('#bc').hidden=m==='study'||pdf;curtain=false;$('#bc').classList.remove('on');ed.classList.remove('drawing');$('#sf').hidden=m!=='study';$('#br').hidden=m!=='study';paint()}
 $('#tm').onclick=()=>{flush();setMode(mode==='study'?'edit':'study')};
 $('#sf').onchange=e=>{flt=e.target.value;hideBar();paint()};
 function resetItem(i){Object.values(i.cards||{}).forEach(c=>{delete c.s;delete c.n;delete c.last;delete c.due;delete c.step});i.updated=Date.now()}
