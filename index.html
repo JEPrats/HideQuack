@@ -332,7 +332,7 @@ $('#acct').onclick=()=>{
  if(!sb)return modal('<h3>Nube no configurada</h3><p>Rellena <code>CFG.url</code> y <code>CFG.key</code> al inicio de index.html.</p>',()=>{});
  if(user)return modal(`<h3>${esc(user.email)}</h3><button data-x="sync">Sincronizar ahora</button><button data-x="out">Cerrar sesión</button>`,async x=>{dlg.close();x==='out'?await sb.auth.signOut():sync()});
  modal('<h3>Cuenta</h3><input id="em" type="email" placeholder="Email"><input id="pw" type="password" placeholder="Contraseña (mín. 6)"><p id="am"></p><button data-x="in">Entrar</button><button data-x="up">Crear cuenta</button>',async x=>{
-  const email=$('#em').value,password=$('#pw').value,r=x==='in'?await sb.auth.signInWithPassword({email,password}):await sb.auth.signUp({email,password});
+  const email=$('#em').value,password=$('#pw').value,r=x==='in'?await sb.auth.signInWithPassword({email,password}):await sb.auth.signUp({email,password,options:{emailRedirectTo:'https://jeprats.github.io/StudyLines/'}});
   if(r.error)$('#am').textContent=r.error.message;else if(!r.data.session)$('#am').textContent='Revisa tu correo para confirmar la cuenta.';else dlg.close()})};
 addEventListener('beforeunload',flush);document.addEventListener('visibilitychange',()=>document.hidden&&flush());
 home();
