@@ -92,10 +92,10 @@ const CFG={
 const $=s=>document.querySelector(s),ed=$('#ed'),dlg=$('#dlg'),bar=$('#rbar');
 const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,8);
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-let S=JSON.parse(localStorage.getItem('sl1')||'null')||{folders:[],items:[]};
+let S={folders:[],items:[]};
 let cur=null,doc=null,mode='edit',flt="all",active=null,st=0;
 const vf=()=>S.folders.filter(f=>!f.del),vi=()=>S.items.filter(i=>!i.del);
-const persist=()=>{localStorage.setItem('sl1',JSON.stringify(S));schedSync()};
+const persist=()=>{if(user)localStorage.setItem('sl1_'+user.id,JSON.stringify(S));schedSync()};
 const toast=m=>{const t=$('#toast');t.textContent=m;t.style.opacity=1;setTimeout(()=>t.style.opacity=0,2200)};
 function modal(h,fn){if(dlg.open)dlg.close();dlg.innerHTML=h;dlg.onclick=e=>{const b=e.target.closest('[data-x]');if(e.target===dlg)dlg.close();else if(b)fn(b.dataset.x)};dlg.showModal()}
 // ---- IndexedDB (PDF originales) ----
@@ -316,7 +316,7 @@ bar.onclick=e=>{const res=e.target.dataset.r;if(!res||!active)return;const id=ac
 // ---- SUPABASE ----
 let sb=null,user=null,syncing=false,tm;
 if(CFG.url&&CFG.key&&window.supabase){sb=supabase.createClient(CFG.url,CFG.key);
- sb.auth.onAuthStateChange((_e,s)=>{user=s?.user||null;$('#acct').textContent=user?user.email:'Entrar';if(user)setTimeout(sync,0);else $('#st').textContent=''})}
+ sb.auth.onAuthStateChange((_e,s)=>{  user=s?.user||null;  $('#acct').textContent=user?user.email:'Entrar';   if(user){   const key='sl1_'+user.id;   const saved=localStorage.getItem(key);   S=saved?JSON.parse(saved):{folders:[],items:[]};   cur=null;   doc=null;   home();   setTimeout(sync,0);  }else{   S={folders:[],items:[]};   cur=null;   doc=null;   $('#st').textContent='';  } })}
 function schedSync(){clearTimeout(tm);if(user)tm=setTimeout(sync,2500)}
 ```js
 async function sync(){
