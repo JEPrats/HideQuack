@@ -318,17 +318,179 @@ let sb=null,user=null,syncing=false,tm;
 if(CFG.url&&CFG.key&&window.supabase){sb=supabase.createClient(CFG.url,CFG.key);
  sb.auth.onAuthStateChange((_e,s)=>{user=s?.user||null;$('#acct').textContent=user?user.email:'Entrar';if(user)setTimeout(sync,0);else $('#st').textContent=''})}
 function schedSync(){clearTimeout(tm);if(user)tm=setTimeout(sync,2500)}
-async function sync(){if(!sb||!user||syncing)return;syncing=true;$('#st').textContent='Sincronizando…';
- try{for(const t of ['folders','items']){const loc=S[t],{data,error}=await sb.from(t).select('*');if(error)throw error;
-   const rm=new Map(data.map(r=>[r.id,r])),up=[];
-   loc.forEach(l=>{const r=rm.get(l.id);if(!r||l.updated>r.updated)up.push({...l,user_id:user.id,del:!!l.del})});
-   data.forEach(r=>{const{user_id,...row}=r,i=loc.findIndex(x=>x.id===r.id);if(i<0)loc.push(row);else if(r.updated>loc[i].updated)loc[i]=row});
-   if(t==='items')for(const u of up)if(u.type==='pdf'&&!u.del){const b=await pdfGet(u.id);
-    if(b){const{error:e}=await sb.storage.from('pdfs').upload(`${user.id}/${u.id}.pdf`,b,{upsert:true,contentType:'application/pdf'});if(e)throw e}}
-   if(up.length){const{error:e}=await sb.from(t).upsert(up);if(e)throw e}}
-  localStorage.setItem('sl1',JSON.stringify(S));if(doc)doc=S.items.find(i=>i.id===doc.id)||doc;else home();
-  $('#st').textContent='Sincronizado'}catch(e){console.error(e);$('#st').textContent='Error de sincronización'}finally{syncing=false}}
-$('#acct').onclick=()=>{
+```js
+async function sync(){
+ if(!sb||!user||syncing)return;
+ syncing=true;
+ $('#st').textContent='Sincronizando…';
+
+ try{
+  // Mapa de IDs que hayan tenido que cambiarse durante esta sincronización.
+  const folderMap=new Map();
+  const itemMap=new Map();
+
+  // Primero sincronizamos carpetas.
+  {
+   const t='folders';
+   const loc=S[t];
+   const {data,error}=await sb.from(t).select('*');
+   if(error)throw error;
+
+   const rm=new Map(data.map(r=>[r.id,r]));
+
+   for(const l of [...loc]){
+    const r=rm.get(l.id);
+
+    // La fila existe y pertenece al usuario actual.
+    if(r){
+     if(l.updated>r.updated){
+      const row={...l,user_id:user.id,del:!!l.del};
+      const {error:e}=await sb.from(t).upsert(row);
+      if(e)throw e;
+     }
+     continue;
+    }
+
+    // No es visible para este usuario.
+    // Intentamos insertar/actualizar normalmente.
+    const row={...l,user_id:user.id,del:!!l.del};
+    let {error:e}=await sb.from(t).upsert(row);
+
+    // Si el ID ya pertenece a otro usuario, RLS lo bloquea.
+    if(e&&e.code==='42501'){
+     const oldId=l.id;
+     const newId=uid();
+
+     // Guardamos la correspondencia oldId -> newId.
+     folderMap.set(oldId,newId);
+
+     // Actualizamos las referencias de los documentos locales.
+     S.items.forEach(i=>{
+      if(i.folder===oldId){
+       i.folder=newId;
+       i.updated=Date.now();
+      }
+     });
+
+     const fresh={...l,id:newId,user_id:user.id,del:!!l.del,updated:Date.now()};
+     const result=await sb.from(t).insert(fresh);
+     if(result.error)throw result.error;
+
+     // Seguimos con la siguiente carpeta.
+     continue;
+    }
+
+    if(e)throw e;
+   }
+  }
+
+  // Después sincronizamos los documentos/PDFs.
+  {
+   const t='items';
+   const loc=S[t];
+   const {data,error}=await sb.from(t).select('*');
+   if(error)throw error;
+
+   const rm=new Map(data.map(r=>[r.id,r]));
+
+   for(const l of [...loc]){
+    // Si la carpeta de este documento cambió de ID,
+    // mantenemos la referencia correcta.
+    if(l.folder&&folderMap.has(l.folder)){
+     l.folder=folderMap.get(l.folder);
+     l.updated=Date.now();
+    }
+
+    const r=rm.get(l.id);
+
+    if(r){
+     if(l.updated>r.updated){
+      const row={...l,user_id:user.id,del:!!l.del};
+      const {error:e}=await sb.from(t).upsert(row);
+      if(e)throw e;
+     }
+     continue;
+    }
+
+    const row={...l,user_id:user.id,del:!!l.del};
+    let {error:e}=await sb.from(t).upsert(row);
+
+    // El ID ya existe pero pertenece a otra cuenta.
+    if(e&&e.code==='42501'){
+     const oldId=l.id;
+     const newId=uid();
+
+     itemMap.set(oldId,newId);
+
+     // Si es un PDF, trasladamos también el original local
+     // al nuevo ID antes de cambiar la referencia.
+     if(l.type==='pdf'){
+      const b=await pdfGet(oldId);
+      if(b)await pdfPut(newId,b);
+     }
+
+     // Cambiamos el ID solamente del registro local.
+     l.id=newId;
+     l.updated=Date.now();
+
+     // Insertamos como registro nuevo del usuario actual.
+     const fresh={...l,user_id:user.id,del:!!l.del};
+     const result=await sb.from(t).insert(fresh);
+     if(result.error)throw result.error;
+
+     // Subimos el PDF usando el nuevo ID.
+     if(l.type==='pdf'&&!l.del){
+      const b=await pdfGet(newId);
+      if(b){
+       const {error:pe}=await sb.storage
+        .from('pdfs')
+        .upload(`${user.id}/${newId}.pdf`,b,{
+         upsert:true,
+         contentType:'application/pdf'
+        });
+       if(pe)throw pe;
+      }
+     }
+
+     continue;
+    }
+
+    if(e)throw e;
+
+    // PDF nuevo o actualizado.
+    if(l.type==='pdf'&&!l.del){
+     const b=await pdfGet(l.id);
+     if(b){
+      const {error:pe}=await sb.storage
+       .from('pdfs')
+       .upload(`${user.id}/${l.id}.pdf`,b,{
+        upsert:true,
+        contentType:'application/pdf'
+       });
+      if(pe)throw pe;
+     }
+    }
+   }
+  }
+
+  localStorage.setItem('sl1',JSON.stringify(S));
+
+  if(doc){
+   doc=S.items.find(i=>i.id===doc.id)||doc;
+  }else{
+   home();
+  }
+
+  $('#st').textContent='Sincronizado';
+
+ }catch(e){
+  console.error('Error de sincronización:',e);
+  $('#st').textContent='Error de sincronización';
+ }finally{
+  syncing=false;
+ }
+}
+```
  if(!sb)return modal('<h3>Nube no configurada</h3><p>Rellena <code>CFG.url</code> y <code>CFG.key</code> al inicio de index.html.</p>',()=>{});
  if(user)return modal(`<h3>${esc(user.email)}</h3><button data-x="sync">Sincronizar ahora</button><button data-x="out">Cerrar sesión</button>`,async x=>{dlg.close();x==='out'?await sb.auth.signOut():sync()});
  modal('<h3>Cuenta</h3><input id="em" type="email" placeholder="Email"><input id="pw" type="password" placeholder="Contraseña (mín. 6)"><p id="am"></p><button data-x="in">Entrar</button><button data-x="up">Crear cuenta</button>',async x=>{
