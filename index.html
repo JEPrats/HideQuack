@@ -84,7 +84,7 @@ dialog input{border:1px solid var(--ln);border-radius:8px;background:var(--pp);c
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
 <script>
 // ===== CONFIG SUPABASE (solo URL y clave publishable/anon; NUNCA la service_role) =====
-const CFG={url:"",key:""};
+const CFG={   url:"TU_API_URL",   key:"TU_PUBLISHABLE_KEY" };
 // ======================================================================================
 const $=s=>document.querySelector(s),ed=$('#ed'),dlg=$('#dlg'),bar=$('#rbar');
 const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,8);
