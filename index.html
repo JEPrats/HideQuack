@@ -95,7 +95,7 @@ const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',
 let S={folders:[],items:[]};
 let cur=null,doc=null,mode='edit',flt="all",active=null,st=0;
 const vf=()=>S.folders.filter(f=>!f.del),vi=()=>S.items.filter(i=>!i.del);
-const persist=()=>{if(user)localStorage.setItem('sl1_'+user.id,JSON.stringify(S));schedSync()};
+const persist=()=>{  localStorage.setItem(user?'sl1_'+user.id:'sl1',JSON.stringify(S));  schedSync(); };
 const toast=m=>{const t=$('#toast');t.textContent=m;t.style.opacity=1;setTimeout(()=>t.style.opacity=0,2200)};
 function modal(h,fn){if(dlg.open)dlg.close();dlg.innerHTML=h;dlg.onclick=e=>{const b=e.target.closest('[data-x]');if(e.target===dlg)dlg.close();else if(b)fn(b.dataset.x)};dlg.showModal()}
 // ---- IndexedDB (PDF originales) ----
@@ -315,168 +315,233 @@ bar.onclick=e=>{const res=e.target.dataset.r;if(!res||!active)return;const id=ac
  doc.cards[id]=k;doc.updated=Date.now();persist();paint();showBar(id)};
 // ---- SUPABASE ----
 let sb=null,user=null,syncing=false,tm;
-if(CFG.url&&CFG.key&&window.supabase){sb=supabase.createClient(CFG.url,CFG.key);
- sb.auth.onAuthStateChange((_e,s)=>{  user=s?.user||null;  $('#acct').textContent=user?user.email:'Entrar';   if(user){   const key='sl1_'+user.id;   const saved=localStorage.getItem(key);   S=saved?JSON.parse(saved):{folders:[],items:[]};   cur=null;   doc=null;   home();   setTimeout(sync,0);  }else{   S={folders:[],items:[]};   cur=null;   doc=null;   $('#st').textContent='';  } })}
-function schedSync(){clearTimeout(tm);if(user)tm=setTimeout(sync,2500)}
-```js
+
+if(CFG.url&&CFG.key&&window.supabase){
+ sb=supabase.createClient(CFG.url,CFG.key);
+
+ sb.auth.onAuthStateChange((_e,s)=>{
+  const next=s?.user||null;
+  const changed=(user?.id||null)!==(next?.id||null);
+
+  if(changed){
+   if(user){
+    if(doc)flush();
+    localStorage.setItem('sl1_'+user.id,JSON.stringify(S));
+   }
+
+   clearTimeout(tm);
+   user=next;
+   cur=null;
+   doc=null;
+   hideBar();
+
+   if(user){
+    const key='sl1_'+user.id;
+    let saved=localStorage.getItem(key);
+
+    // Recuperar los datos antiguos una sola vez.
+    if(!localStorage.getItem('sl1_legacy_claimed')){
+     const legacy=localStorage.getItem('sl1');
+     if(legacy){
+      const old=JSON.parse(legacy);
+      const current=saved?JSON.parse(saved):{folders:[],items:[]};
+
+      old.folders||=[];
+      old.items||=[];
+      current.folders||=[];
+      current.items||=[];
+
+      old.folders.forEach(x=>{
+       if(!current.folders.some(y=>y.id===x.id))current.folders.push(x);
+      });
+      old.items.forEach(x=>{
+       if(!current.items.some(y=>y.id===x.id))current.items.push(x);
+      });
+
+      saved=JSON.stringify(current);
+      localStorage.setItem(key,saved);
+      localStorage.setItem('sl1_legacy_claimed',user.id);
+     }
+    }
+
+    S=saved?JSON.parse(saved):{folders:[],items:[]};
+    $('#acct').textContent=user.email;
+    home();
+    setTimeout(sync,0);
+   }else{
+    S={folders:[],items:[]};
+    $('#acct').textContent='Entrar';
+    $('#st').textContent='';
+    home();
+   }
+  }else{
+   user=next;
+   $('#acct').textContent=user?user.email:'Entrar';
+  }
+ });
+}
+
+function schedSync(){
+ clearTimeout(tm);
+ if(user)tm=setTimeout(sync,2500);
+}
+
 async function sync(){
  if(!sb||!user||syncing)return;
+
  syncing=true;
+ const owner=user.id;
  $('#st').textContent='Sincronizando…';
 
  try{
-  // Mapa de IDs que hayan tenido que cambiarse durante esta sincronización.
-  const folderMap=new Map();
-  const itemMap=new Map();
-
-  // Primero sincronizamos carpetas.
+  // 1. Sincronizar carpetas.
   {
    const t='folders';
-   const loc=S[t];
+   const loc=S.folders;
    const {data,error}=await sb.from(t).select('*');
    if(error)throw error;
 
-   const rm=new Map(data.map(r=>[r.id,r]));
+   const remote=new Map(data.map(r=>[r.id,r]));
 
-   for(const l of [...loc]){
-    const r=rm.get(l.id);
+   for(let n=0;n<loc.length;n++){
+    let l=loc[n];
+    const r=remote.get(l.id);
 
-    // La fila existe y pertenece al usuario actual.
     if(r){
-     if(l.updated>r.updated){
-      const row={...l,user_id:user.id,del:!!l.del};
-      const {error:e}=await sb.from(t).upsert(row);
+     if((l.updated||0)>(r.updated||0)){
+      const {error:e}=await sb.from(t)
+       .update({...l,user_id:owner,del:!!l.del})
+       .eq('id',l.id);
       if(e)throw e;
+     }else{
+      const {user_id,...row}=r;
+      loc[n]=row;
      }
      continue;
     }
 
-    // No es visible para este usuario.
-    // Intentamos insertar/actualizar normalmente.
-    const row={...l,user_id:user.id,del:!!l.del};
-    let {error:e}=await sb.from(t).upsert(row);
+    let saved=false;
 
-    // Si el ID ya pertenece a otro usuario, RLS lo bloquea.
-    if(e&&e.code==='42501'){
+    for(let attempt=0;attempt<5&&!saved;attempt++){
+     const {error:e}=await sb.from(t)
+      .insert({...l,user_id:owner,del:!!l.del});
+
+     if(!e){
+      saved=true;
+      break;
+     }
+
+     // Un ID ocupado por otra cuenta: generar uno nuevo.
+     if(e.code!=='23505'&&e.code!=='42501')throw e;
+
      const oldId=l.id;
      const newId=uid();
 
-     // Guardamos la correspondencia oldId -> newId.
-     folderMap.set(oldId,newId);
+     l={...l,id:newId,updated:Date.now()};
+     loc[n]=l;
 
-     // Actualizamos las referencias de los documentos locales.
      S.items.forEach(i=>{
       if(i.folder===oldId){
        i.folder=newId;
        i.updated=Date.now();
       }
      });
-
-     const fresh={...l,id:newId,user_id:user.id,del:!!l.del,updated:Date.now()};
-     const result=await sb.from(t).insert(fresh);
-     if(result.error)throw result.error;
-
-     // Seguimos con la siguiente carpeta.
-     continue;
     }
 
-    if(e)throw e;
+    if(!saved)throw new Error('No se pudo guardar la carpeta.');
    }
   }
 
-  // Después sincronizamos los documentos/PDFs.
+  // 2. Sincronizar documentos.
   {
    const t='items';
-   const loc=S[t];
+   const loc=S.items;
    const {data,error}=await sb.from(t).select('*');
    if(error)throw error;
 
-   const rm=new Map(data.map(r=>[r.id,r]));
+   const remote=new Map(data.map(r=>[r.id,r]));
 
-   for(const l of [...loc]){
-    // Si la carpeta de este documento cambió de ID,
-    // mantenemos la referencia correcta.
-    if(l.folder&&folderMap.has(l.folder)){
-     l.folder=folderMap.get(l.folder);
-     l.updated=Date.now();
-    }
-
-    const r=rm.get(l.id);
+   for(let n=0;n<loc.length;n++){
+    let l=loc[n];
+    const r=remote.get(l.id);
 
     if(r){
-     if(l.updated>r.updated){
-      const row={...l,user_id:user.id,del:!!l.del};
-      const {error:e}=await sb.from(t).upsert(row);
+     if((l.updated||0)>(r.updated||0)){
+      const {error:e}=await sb.from(t)
+       .update({...l,user_id:owner,del:!!l.del})
+       .eq('id',l.id);
       if(e)throw e;
+     }else{
+      const {user_id,...row}=r;
+      loc[n]=row;
+      l=loc[n];
      }
-     continue;
+    }else{
+     let saved=false;
+
+     for(let attempt=0;attempt<5&&!saved;attempt++){
+      const {error:e}=await sb.from(t)
+       .insert({...l,user_id:owner,del:!!l.del});
+
+      if(!e){
+       saved=true;
+       break;
+      }
+
+      if(e.code!=='23505'&&e.code!=='42501')throw e;
+
+      const oldId=l.id;
+      const newId=uid();
+
+      // Si es un PDF, conservar su archivo original.
+      if(l.type==='pdf'){
+       const b=await pdfGet(oldId);
+       if(b)await pdfPut(newId,b);
+      }
+
+      l={...l,id:newId,updated:Date.now()};
+      loc[n]=l;
+
+      // Actualizar las reseñas asociadas al documento.
+      const {error:re}=await sb.from('reviews')
+       .update({item_id:newId})
+       .eq('item_id',oldId)
+       .eq('user_id',owner);
+
+      if(re)throw re;
+     }
+
+     if(!saved)throw new Error('No se pudo guardar el documento.');
     }
 
-    const row={...l,user_id:user.id,del:!!l.del};
-    let {error:e}=await sb.from(t).upsert(row);
+    // 3. Subir los PDF pendientes.
+    if(l.type==='pdf'&&!l.del){
+     const flag='slpdf_'+owner+'_'+l.id;
 
-    // El ID ya existe pero pertenece a otra cuenta.
-    if(e&&e.code==='42501'){
-     const oldId=l.id;
-     const newId=uid();
+     if(!localStorage.getItem(flag)){
+      const b=await getBlob(l.id);
 
-     itemMap.set(oldId,newId);
-
-     // Si es un PDF, trasladamos también el original local
-     // al nuevo ID antes de cambiar la referencia.
-     if(l.type==='pdf'){
-      const b=await pdfGet(oldId);
-      if(b)await pdfPut(newId,b);
-     }
-
-     // Cambiamos el ID solamente del registro local.
-     l.id=newId;
-     l.updated=Date.now();
-
-     // Insertamos como registro nuevo del usuario actual.
-     const fresh={...l,user_id:user.id,del:!!l.del};
-     const result=await sb.from(t).insert(fresh);
-     if(result.error)throw result.error;
-
-     // Subimos el PDF usando el nuevo ID.
-     if(l.type==='pdf'&&!l.del){
-      const b=await pdfGet(newId);
       if(b){
        const {error:pe}=await sb.storage
         .from('pdfs')
-        .upload(`${user.id}/${newId}.pdf`,b,{
+        .upload(`${owner}/${l.id}.pdf`,b,{
          upsert:true,
          contentType:'application/pdf'
         });
+
        if(pe)throw pe;
+       localStorage.setItem(flag,'1');
       }
-     }
-
-     continue;
-    }
-
-    if(e)throw e;
-
-    // PDF nuevo o actualizado.
-    if(l.type==='pdf'&&!l.del){
-     const b=await pdfGet(l.id);
-     if(b){
-      const {error:pe}=await sb.storage
-       .from('pdfs')
-       .upload(`${user.id}/${l.id}.pdf`,b,{
-        upsert:true,
-        contentType:'application/pdf'
-       });
-      if(pe)throw pe;
      }
     }
    }
   }
 
-  localStorage.setItem('sl1',JSON.stringify(S));
+  // Guardar siempre los datos separados por cuenta.
+  localStorage.setItem('sl1_'+owner,JSON.stringify(S));
 
   if(doc){
-   doc=S.items.find(i=>i.id===doc.id)||doc;
+   doc=S.items.find(i=>i.id===doc.id)||null;
   }else{
    home();
   }
@@ -490,12 +555,61 @@ async function sync(){
   syncing=false;
  }
 }
-```
- if(!sb)return modal('<h3>Nube no configurada</h3><p>Rellena <code>CFG.url</code> y <code>CFG.key</code> al inicio de index.html.</p>',()=>{});
- if(user)return modal(`<h3>${esc(user.email)}</h3><button data-x="sync">Sincronizar ahora</button><button data-x="out">Cerrar sesión</button>`,async x=>{dlg.close();x==='out'?await sb.auth.signOut():sync()});
- modal('<h3>Cuenta</h3><input id="em" type="email" placeholder="Email"><input id="pw" type="password" placeholder="Contraseña (mín. 6)"><p id="am"></p><button data-x="in">Entrar</button><button data-x="up">Crear cuenta</button>',async x=>{
-  const email=$('#em').value,password=$('#pw').value,r=x==='in'?await sb.auth.signInWithPassword({email,password}):await sb.auth.signUp({email,password,options:{emailRedirectTo:'https://jeprats.github.io/StudyLines/'}});
-  if(r.error)$('#am').textContent=r.error.message;else if(!r.data.session)$('#am').textContent='Revisa tu correo para confirmar la cuenta.';else dlg.close()})};
+
+// ---- CUENTA ----
+$('#acct').onclick=()=>{
+ if(!sb)return modal(
+  '<h3>Nube no configurada</h3><p>Rellena CFG.url y CFG.key.</p>',
+  ()=>{}
+ );
+
+ if(user)return modal(
+  `<h3>${esc(user.email)}</h3>
+   <button data-x="sync">Sincronizar ahora</button>
+   <button data-x="out">Cerrar sesión</button>`,
+  async x=>{
+   dlg.close();
+   if(x==='out')await sb.auth.signOut();
+   else if(x==='sync')sync();
+  }
+ );
+
+ modal(
+  '<h3>Cuenta</h3>'+
+  '<input id="em" type="email" placeholder="Email">'+
+  '<input id="pw" type="password" placeholder="Contraseña (mín. 6)">'+
+  '<p id="am"></p>'+
+  '<button data-x="in">Entrar</button>'+
+  '<button data-x="up">Crear cuenta</button>',
+  async x=>{
+   const email=$('#em').value;
+   const password=$('#pw').value;
+
+   if(!email||!password){
+    $('#am').textContent='Introduce email y contraseña.';
+    return;
+   }
+
+   const r=x==='in'
+    ?await sb.auth.signInWithPassword({email,password})
+    :await sb.auth.signUp({
+      email,
+      password,
+      options:{
+       emailRedirectTo:'https://jeprats.github.io/StudyLines/'
+      }
+     });
+
+   if(r.error){
+    $('#am').textContent=r.error.message;
+   }else if(!r.data.session){
+    $('#am').textContent='Revisa tu correo para confirmar la cuenta.';
+   }else{
+    dlg.close();
+   }
+  }
+ );
+};
 addEventListener('beforeunload',flush);document.addEventListener('visibilitychange',()=>document.hidden&&flush());
 home();
 </script></body></html>
