@@ -183,39 +183,47 @@ ed.addEventListener('input',()=>{norm();ed.querySelectorAll('.card,.cm').forEach
   setL(L,'h',+n.data[1]);n.data=n.data.slice(3);if(!n.data){L.innerHTML='<br>';put(L)}else{const r=document.createRange();r.setStart(n,0);r.collapse(true);s.removeAllRanges();s.addRange(r)}return save()}
  // Ocultar cuando se completa: < texto <
 if(n && n.nodeType === 3){
-  const text = n.data;
-  const pos = o;
+  const text = n.data
+  // Ocultar SOLO cuando se completa: < texto <
+if(n && n.nodeType===3){
+  const text=n.data;
+  const pos=o;
 
-  // Buscar el último "<" escrito antes del cursor
-  const start = text.lastIndexOf('<', pos - 1);
+  // El carácter que acabamos de escribir DEBE ser "<"
+  if(pos>0 && text[pos-1]==='<'){
 
-  if(start !== -1){
-    // El segundo "<" debe ser exactamente el que acabamos de escribir
-    if(text[pos - 1] === '<' && start < pos - 1){
+    // Buscar el PRIMER "<" hacia atrás,
+    // pero sin poder ser el mismo "<" que acabamos de escribir
+    const start=text.lastIndexOf('<',pos-2);
 
-      const hidden = text.slice(start + 1, pos - 1);
+    // Si no existe un "<" anterior, no hacemos absolutamente nada
+    if(start!==-1){
 
+      const hidden=text.slice(start+1,pos-1);
+
+      // Debe haber texto entre los dos "<"
       if(hidden.trim()){
-        const before = text.slice(0, start);
-        const after = text.slice(pos);
 
-        const card = document.createElement('span');
-        card.className = 'card';
-        card.dataset.id = uid();
-        card.textContent = hidden;
+        const before=text.slice(0,start);
+        const after=text.slice(pos);
 
-        const tail = document.createTextNode(after);
+        const card=document.createElement('span');
+        card.className='card';
+        card.dataset.id=uid();
+        card.textContent=hidden;
+
+        const tail=document.createTextNode(after);
 
         if(before){
-          n.data = before;
-          n.after(card, tail);
+          n.data=before;
+          n.after(card,tail);
         }else{
-          n.replaceWith(card, tail);
+          n.replaceWith(card,tail);
         }
 
-        // El cursor queda justo después del ocultamiento
-        const r = document.createRange();
-        r.setStart(tail, 0);
+        // Cursor justo después del ocultamiento
+        const r=document.createRange();
+        r.setStart(tail,0);
         r.collapse(true);
 
         s.removeAllRanges();
@@ -228,26 +236,6 @@ if(n && n.nodeType === 3){
     }
   }
 }
-// ---- Ocultar selección ----
-function hideSel(){doc.type==='pdf'?hideSelPdf():hideSelText()}
-function hideSelText(){const s=getSelection();if(!s.rangeCount||s.isCollapsed)return toast('Selecciona primero un texto');
- const r=s.getRangeAt(0);if(!ed.contains(r.commonAncestorContainer))return toast('Selecciona texto dentro del documento');let n=0;
- ed.querySelectorAll('.ln').forEach(L=>{if(!r.intersectsNode(L))return;const q=document.createRange();q.selectNodeContents(L);
-  if(r.compareBoundaryPoints(Range.START_TO_START,q)>0)q.setStart(r.startContainer,r.startOffset);
-  if(r.compareBoundaryPoints(Range.END_TO_END,q)<0)q.setEnd(r.endContainer,r.endOffset);
-  if(q.toString().replace(/\u200b/g,'').trim()==='')return;
-  const a=q.commonAncestorContainer;if((a.nodeType===1?a:a.parentElement).closest('.card'))return;
-  const f=q.extractContents();f.querySelectorAll('.card').forEach(c=>c.replaceWith(...c.childNodes));
-  const sp=document.createElement('span');sp.className='card';sp.dataset.id=uid();sp.append(f);q.insertNode(sp);n++});
- s.removeAllRanges();if(n){paint();flush();toast(n>1?n+' tarjetas creadas':'Tarjeta creada')}}
-$('#hs').addEventListener('pointerdown',e=>e.preventDefault());$('#hs').onclick=hideSel;
-  document.addEventListener('keydown',e=>{
- if((e.ctrlKey||e.metaKey)&&e.key==='<'){
-  if(!doc||mode!=='edit'||dlg.open)return;
-  e.preventDefault();
-  hideSel();
- }
-});
 // ---- PDF (visor fiel + capa de texto + tarjetas superpuestas) ----
 const PDFW='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';let pdfW=0;
 async function getBlob(id){let b=await pdfGet(id);if(!b&&sb&&user){const{data}=await sb.storage.from('pdfs').download(`${user.id}/${id}.pdf`);if(data){b=data;pdfPut(id,b)}}return b}
