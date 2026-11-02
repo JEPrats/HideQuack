@@ -151,6 +151,7 @@ const esc=s=>String(s).replace(/[&<>"]/g,c=>({
   '"':'&quot;'
 }[c]));
 
+let stateOwner=null; // cuenta a la que pertenece S (null = modo local sin cuenta)
 let S={folders:[],items:[]};
 let cur=null;
 let doc=null;
@@ -158,13 +159,14 @@ let mode='edit';
 let flt="all";
 let active=null;
 let st=0;
+let dirty=false; // hay cambios del editor pendientes de volcar a doc
 
 const vf=()=>S.folders.filter(f=>!f.del);
 const vi=()=>S.items.filter(i=>!i.del);
 
 const persist=()=>{
   localStorage.setItem(
-    user?'sl1_'+user.id:'sl1',
+    stateOwner?'sl1_'+stateOwner:'sl1',
     JSON.stringify(S)
   );
   schedSync();
@@ -651,7 +653,7 @@ function flush(){
     doc.type==='pdf' ||
     $('#docv').hidden
   )return;
-
+  dirty=false;
   doc.html=ser();
   doc.updated=Date.now();
 
@@ -659,6 +661,7 @@ function flush(){
 }
 
 const save=()=>{
+  dirty=true;
   clearTimeout(st);
   st=setTimeout(flush,400);
 };
@@ -954,7 +957,42 @@ ed.addEventListener('keydown',e=>{
   }
 });
 
-ed.addEventListener('input',()=>{
+// Convierte  "texto <oculto<"  en tarjeta cuando se escribe el SEGUNDO "<".
+// Devuelve true si modificó el DOM. El primer "<" nunca toca el DOM.
+function tryCard(){
+  const s=getSelection();
+  if(!s.rangeCount||!s.isCollapsed)return false;
+  let n=s.anchorNode,o=s.anchorOffset;
+  if(!n||!ed.contains(n))return false;
+  if(n.nodeType===1){ // cursor en un elemento: usar el nodo de texto contiguo
+    const a=n.childNodes[o-1],b=n.childNodes[o];
+    if(a&&a.nodeType===3){n=a;o=a.data.length}
+    else if(b&&b.nodeType===3){n=b;o=0}
+    else return false;
+  }
+  if(n.nodeType!==3||!n.parentElement)return false;
+  if(n.parentElement.closest('.card,.cm,.cur,.im')||!n.parentElement.closest('.ln'))return false;
+  let merged=false;
+  while(n.previousSibling&&n.previousSibling.nodeType===3){ // texto partido por el navegador
+    const p=n.previousSibling;o+=p.data.length;n.data=p.data+n.data;p.remove();merged=true;
+  }
+  if(merged){const r=document.createRange();r.setStart(n,o);r.collapse(true);s.removeAllRanges();s.addRange(r)}
+  if(o<2||n.data[o-1]!=='<')return false;
+  const start=n.data.lastIndexOf('<',o-2);
+  if(start<0)return false;
+  const m=n.data.slice(start+1,o-1).replace(/\u200b/g,'').match(/^(\s*)([\s\S]*?)(\s*)$/);
+  if(!m[2])return false;
+  const before=n.data.slice(0,start)+m[1];
+  const sp=document.createElement('span');
+  sp.className='card';sp.dataset.id=uid();sp.textContent=m[2];
+  const tail=document.createTextNode('\u200b'+m[3]+n.data.slice(o));
+  if(before){n.data=before;n.after(sp,tail)}else n.replaceWith(sp,tail);
+  const r=document.createRange();r.setStart(tail,1);r.collapse(true);
+  s.removeAllRanges();s.addRange(r);
+  return true;
+}
+ed.addEventListener('compositionend',()=>{if(tryCard()){paint();save()}});
+ed.addEventListener('input',(e)=>{
   norm();
 
   ed.querySelectorAll('.card,.cm').forEach(c=>{
@@ -1014,62 +1052,12 @@ ed.addEventListener('input',()=>{
   }
 
   // ----------------------------------------------------------
-  // OCULTACIÓN AUTOMÁTICA
-  //
-  // Sintaxis:
-  //
-  //     < texto <
-  //
-  // El primer < NO hace nada.
-  // Al escribir el segundo < se convierte "texto"
-  // en una tarjeta.
-  // El cursor queda fuera de la tarjeta.
+  // OCULTACIÓN AUTOMÁTICA:  Texto <oculto< texto
   // ----------------------------------------------------------
-
-  if(
-    n &&
-    n.nodeType===3 &&
-    o>0 &&
-    n.data[o-1]==='<' &&
-    !n.parentElement.closest('.card')
-  ){
-    const start=n.data.lastIndexOf('<',o-2);
-
-    if(start!==-1){
-      const hidden=n.data.slice(start+1,o-1);
-
-      if(hidden.trim()){
-        const before=n.data.slice(0,start);
-        const after=n.data.slice(o);
-
-        const sp=document.createElement('span');
-
-        sp.className='card';
-        sp.dataset.id=uid();
-        sp.textContent=hidden;
-
-        const tail=document.createTextNode(after);
-
-        if(before){
-          n.data=before;
-          n.after(sp,tail);
-        }else{
-          n.replaceWith(sp,tail);
-        }
-
-        const r=document.createRange();
-
-        r.setStart(tail,0);
-        r.collapse(true);
-
-        s.removeAllRanges();
-        s.addRange(r);
-
-        paint();
-      }
-    }
+  if(!(e&&e.isComposing)&&tryCard()){
+    paint();
+    return save();
   }
-
   // ----------------------------------------------------------
   // COMENTARIO DE TARJETA
   // ++
@@ -2440,7 +2428,9 @@ bar.onclick=e=>{
 
 let sb=null;
 let user=null;
-let syncing=false;
+let syncing=false;   // generación de sesión que está sincronizando (false = libre)
+let pending=false;   // hay que repetir la sincronización al terminar la actual
+let gen=0;           // se incrementa en cada cambio de sesión
 let tm;
 
 if(
@@ -2456,154 +2446,80 @@ if(
   sb.auth.onAuthStateChange(
     (_e,s)=>{
       const next=s?.user||null;
+      const changed=(user?.id||null)!==(next?.id||null);
 
-      const changed=
-        (user?.id||null)!==
-        (next?.id||null);
-
-      if(changed){
-
-        if(user){
-          if(doc)flush();
-
-          localStorage.setItem(
-            'sl1_'+user.id,
-            JSON.stringify(S)
-          );
-        }
-
-        clearTimeout(tm);
-
+      if(!changed){
+        // mismo usuario (refresco de token, etc.): no reiniciar nada
         user=next;
-        cur=null;
-        doc=null;
+        $('#acct').textContent=user?user.email:'Entrar';
+        return;
+      }
 
-        hideBar();
+      // 1) Guardar el estado de la cuenta saliente bajo SU clave
+      if(user){
+        if(doc)flush();
+        localStorage.setItem('sl1_'+user.id,JSON.stringify(S));
+      }
 
-        if(user){
+      // 2) Invalidar sincronizaciones y temporizadores de la sesión anterior
+      gen++;
+      pending=false;
+      clearTimeout(tm);
+      clearTimeout(st);
+      dirty=false;
 
-          const key=
-            'sl1_'+user.id;
+      user=next;
+      cur=null;
+      doc=null;
+      mode='edit';
+      active=null;
+      ed.innerHTML='';
+      hideBar();
+      $('#st').textContent='';
 
-          let saved=
-            localStorage.getItem(key);
+      if(user){
+        const key='sl1_'+user.id;
+        let saved=localStorage.getItem(key);
 
-          // --------------------------------------------------
-          // Recuperar datos antiguos una sola vez POR CUENTA
-          // --------------------------------------------------
-
-          if(
-            localStorage.getItem(
-              'sl1_legacy_claimed'
-            )!==user.id
-          ){
-            const legacy=
-              localStorage.getItem('sl1');
-
-            if(legacy){
-              try{
-                const old=
-                  JSON.parse(legacy);
-
-                const current=
-                  saved
-                    ?JSON.parse(saved)
-                    :{
-                      folders:[],
-                      items:[]
-                    };
-
-                old.folders||=[];
-                old.items||=[];
-
-                current.folders||=[];
-                current.items||=[];
-
-                old.folders.forEach(x=>{
-                  if(
-                    !current.folders.some(
-                      y=>y.id===x.id
-                    )
-                  ){
-                    current.folders.push(x);
-                  }
-                });
-
-                old.items.forEach(x=>{
-                  if(
-                    !current.items.some(
-                      y=>y.id===x.id
-                    )
-                  ){
-                    current.items.push(x);
-                  }
-                });
-
-                saved=
-                  JSON.stringify(current);
-
-                localStorage.setItem(
-                  key,
-                  saved
-                );
-
-                localStorage.setItem(
-                  'sl1_legacy_claimed',
-                  user.id
-                );
-
-              }catch(e){
-                console.error(
-                  'No se pudieron recuperar los datos antiguos:',
-                  e
-                );
-              }
+        // Recuperar datos antiguos una sola vez POR CUENTA
+        if(localStorage.getItem('sl1_legacy_claimed')!==user.id){
+          const legacy=localStorage.getItem('sl1');
+          if(legacy){
+            try{
+              const old=JSON.parse(legacy);
+              const current=saved?JSON.parse(saved):{folders:[],items:[]};
+              old.folders||=[];old.items||=[];
+              current.folders||=[];current.items||=[];
+              old.folders.forEach(x=>{
+                if(!current.folders.some(y=>y.id===x.id))current.folders.push(x);
+              });
+              old.items.forEach(x=>{
+                if(!current.items.some(y=>y.id===x.id))current.items.push(x);
+              });
+              saved=JSON.stringify(current);
+              localStorage.setItem(key,saved);
+              localStorage.setItem('sl1_legacy_claimed',user.id);
+            }catch(e){
+              console.error('No se pudieron recuperar los datos antiguos:',e);
             }
           }
-
-          S=
-            saved
-              ?JSON.parse(saved)
-              :{
-                folders:[],
-                items:[]
-              };
-
-          S.folders||=[];
-          S.items||=[];
-
-          $('#acct').textContent=
-            user.email;
-
-          home();
-
-          // Descargar inmediatamente
-          // lo que ya existe en Supabase.
-          setTimeout(sync,0);
-
-        }else{
-
-          S={
-            folders:[],
-            items:[]
-          };
-
-          $('#acct').textContent=
-            'Entrar';
-
-          $('#st').textContent='';
-
-          home();
         }
 
+        let loaded=null;
+        try{loaded=saved?JSON.parse(saved):null}catch(e){console.error(e)}
+        S=loaded||{folders:[],items:[]};
+        S.folders||=[];
+        S.items||=[];
+        stateOwner=user.id;
+
+        $('#acct').textContent=user.email;
+        home();               // 1º pintar el estado local de la cuenta
+        setTimeout(sync,0);   // 2º fusionar con Supabase
       }else{
-
-        user=next;
-
-        $('#acct').textContent=
-          user
-            ?user.email
-            :'Entrar';
+        S={folders:[],items:[]};
+        stateOwner=null;
+        $('#acct').textContent='Entrar';
+        home();
       }
     }
   );
@@ -2611,542 +2527,209 @@ if(
 
 function schedSync(){
   clearTimeout(tm);
-
   if(user){
-    tm=setTimeout(
-      sync,
-      2500
-    );
+    tm=setTimeout(sync,2500);
   }
 }
 
 // ============================================================
-// SINCRONIZACIÓN BIDIRECCIONAL
+// SINCRONIZACIÓN BIDIRECCIONAL (fusión por id)
 //
-// Antes:
-//   navegador nuevo = S vacío
-//   sync() solo recorría S
-//   => nunca añadía los datos remotos.
-//
-// Ahora:
-//   1. descarga remoto
-//   2. añade remoto que falte localmente
-//   3. sustituye local si remoto es más nuevo
-//   4. sube local que falte remotamente
-//   5. actualiza remoto si local es más nuevo
+//  1. Descarga las filas remotas del usuario (no toca S).
+//  2. Fusiona remoto -> local en un bloque SIN awaits:
+//       solo remoto  -> se incorpora
+//       ambos        -> gana el de `updated` mayor (empate: remoto)
+//  3. Sube local -> remoto (inserta lo que falta, actualiza si local es más nuevo).
+//  4. Cada await comprueba que la sesión sigue siendo la misma (gen/user);
+//     si cambió, la operación se abandona sin tocar S, la UI ni localStorage.
 // ============================================================
 
+async function fetchAll(t,owner,chk){
+  const out=[];
+  for(let a=0;;a+=500){
+    const {data,error}=await sb
+      .from(t)
+      .select('*')
+      .eq('user_id',owner)
+      .order('id')
+      .range(a,a+499);
+    chk();
+    if(error)throw error;
+    out.push(...(data||[]));
+    if(!data||data.length<500)break;
+  }
+  return out;
+}
+
 async function sync(){
-  if(
-    !sb ||
-    !user ||
-    syncing
-  )return;
+  if(!sb||!user)return;
 
-  syncing=true;
-
+  const g=gen;
   const owner=user.id;
 
-  $('#st').textContent=
-    'Sincronizando…';
+  // Ya hay una sincronización de ESTA sesión: encolar otra al terminar.
+  if(syncing===g){pending=true;return}
+  syncing=g;
+  pending=false;
+
+  const STALE=new Error('sesión cambiada');
+  const chk=()=>{
+    if(g!==gen||!user||user.id!==owner)throw STALE;
+  };
+  const row=l=>({...l,user_id:owner,del:!!l.del});
+  const clean=r=>{const {user_id,...x}=r;return x};
+
+  $('#st').textContent='Sincronizando…';
 
   try{
+    // ---------- 1. descargar (solo lectura) ----------
+    const rf=await fetchAll('folders',owner,chk);
+    const ri=await fetchAll('items',owner,chk);
+    chk();
 
-    // ========================================================
-    // CARPETAS
-    // ========================================================
-
-    {
-      const t='folders';
-      const loc=S.folders;
-
-      const {
-        data,
-        error
-      }=await sb
-        .from(t)
-        .select('*');
-
-      if(error)throw error;
-
-      const rows=data||[];
-
-      const clean=r=>{
-        const {
-          user_id,
-          ...row
-        }=r;
-
-        return row;
-      };
-
-      // ------------------------------------------------------
-      // 1. TRAER REMOTO -> LOCAL
-      // ------------------------------------------------------
-
-      const localMap=
-        new Map(
-          loc.map(x=>[x.id,x])
-        );
-
+    // ---------- 2. fusionar remoto -> local (síncrono) ----------
+    if(dirty&&doc)flush(); // ediciones aún no volcadas: que compitan con su fecha real
+    const prev=doc?{id:doc.id,html:doc.html,updated:doc.updated}:null;
+    const merge=(loc,rows)=>{
       rows.forEach(raw=>{
         const r=clean(raw);
-        const l=localMap.get(r.id);
-
-        if(!l){
-          loc.push(r);
-          localMap.set(r.id,r);
-        }else if(
-          (r.updated||0)>
-          (l.updated||0)
-        ){
-          const ix=
-            loc.findIndex(
-              x=>x.id===r.id
-            );
-
-          if(ix!==-1){
-            loc[ix]=r;
-            localMap.set(
-              r.id,
-              r
-            );
-          }
-        }
+        const i=loc.findIndex(x=>x.id===r.id);
+        if(i<0)loc.push(r);
+        else if((r.updated||0)>=(loc[i].updated||0))loc[i]=r;
       });
+    };
+    merge(S.folders,rf);
+    merge(S.items,ri);
 
-      // ------------------------------------------------------
-      // 2. LOCAL -> REMOTO
-      // ------------------------------------------------------
+    // ---------- 3. subir local -> remoto ----------
+    const remoteF=new Map(rf.map(r=>[r.id,r]));
+    const remoteI=new Map(ri.map(r=>[r.id,r]));
 
-      const remote=
-        new Map(
-          rows.map(r=>[r.id,r])
-        );
+    // Comprueba si una fila propia con ese id ya existe (carrera entre dispositivos)
+    const mine=async(t,id)=>{
+      const {data,error}=await sb.from(t).select('id,updated').eq('id',id).eq('user_id',owner);
+      chk();
+      if(error)throw error;
+      return (data||[])[0]||null;
+    };
 
-      for(
-        let n=0;
-        n<loc.length;
-        n++
-      ){
-        let l=loc[n];
-        let r=remote.get(l.id);
-
-        // No existe remotamente:
-        // subirlo.
-        if(!r){
-
-          let saved=false;
-
-          for(
-            let attempt=0;
-            attempt<5&&!saved;
-            attempt++
-          ){
-
-            const {
-              error:e
-            }=await sb
-              .from(t)
-              .insert({
-                ...l,
-                user_id:owner,
-                del:!!l.del
-              });
-
-            if(!e){
-              saved=true;
-
-              remote.set(
-                l.id,
-                {
-                  ...l,
-                  user_id:owner
-                }
-              );
-
-              break;
-            }
-
-            // Solo tratar 23505 como
-            // colisión real de ID.
-            if(e.code!=='23505'){
-              throw e;
-            }
-
-            const oldId=l.id;
-            const newId=uid();
-
-            l={
-              ...l,
-              id:newId,
-              updated:Date.now()
-            };
-
-            loc[n]=l;
-
-            S.items.forEach(i=>{
-              if(i.folder===oldId){
-                i.folder=newId;
-                i.updated=Date.now();
-              }
-            });
+    // Carpetas
+    for(const id0 of S.folders.map(x=>x.id)){
+      let id=id0;
+      for(let a=0;a<5;a++){
+        const l=S.folders.find(x=>x.id===id);
+        if(!l)break;
+        const r=remoteF.get(id);
+        if(r){
+          if((l.updated||0)>(r.updated||0)){
+            const {error}=await sb.from('folders').update(row(l)).eq('id',id).eq('user_id',owner);
+            chk();
+            if(error)throw error;
+            remoteF.set(id,{...l,user_id:owner});
           }
-
-          if(!saved){
-            throw new Error(
-              'No se pudo guardar la carpeta.'
-            );
-          }
-
-          continue;
+          break;
         }
-
-        // Local más nuevo:
-        // actualizar remoto.
-        if(
-          (l.updated||0)>
-          (r.updated||0)
-        ){
-          const {
-            error:e
-          }=await sb
-            .from(t)
-            .update({
-              ...l,
-              user_id:owner,
-              del:!!l.del
-            })
-            .eq(
-              'id',
-              l.id
-            );
-
-          if(e)throw e;
-
-          remote.set(
-            l.id,
-            {
-              ...l,
-              user_id:owner
-            }
-          );
-        }
+        const {error}=await sb.from('folders').insert(row(l));
+        chk();
+        if(!error){remoteF.set(id,{...l,user_id:owner});break}
+        if(error.code!=='23505')throw error;      // RLS u otro error: NO es colisión
+        const ex=await mine('folders',id);
+        if(ex){remoteF.set(id,ex);continue}       // era nuestra: actualizar en la vuelta siguiente
+        // Colisión real (el id pertenece a otra cuenta): nuevo id + referencias
+        const nid=uid(),now=Date.now();
+        l.id=nid;l.updated=now;
+        S.items.forEach(i=>{if(i.folder===id){i.folder=nid;i.updated=now}});
+        if(cur===id)cur=nid;
+        id=nid;
       }
     }
 
-    // ========================================================
-    // DOCUMENTOS
-    // ========================================================
-
-    {
-      const t='items';
-      const loc=S.items;
-
-      const {
-        data,
-        error
-      }=await sb
-        .from(t)
-        .select('*');
-
-      if(error)throw error;
-
-      const rows=data||[];
-
-      const clean=r=>{
-        const {
-          user_id,
-          ...row
-        }=r;
-
-        return row;
-      };
-
-      // ------------------------------------------------------
-      // 1. TRAER REMOTO -> LOCAL
-      // ------------------------------------------------------
-
-      const localMap=
-        new Map(
-          loc.map(x=>[x.id,x])
-        );
-
-      rows.forEach(raw=>{
-        const r=clean(raw);
-        const l=localMap.get(r.id);
-
-        if(!l){
-          loc.push(r);
-          localMap.set(
-            r.id,
-            r
-          );
-        }else if(
-          (r.updated||0)>
-          (l.updated||0)
-        ){
-          const ix=
-            loc.findIndex(
-              x=>x.id===r.id
-            );
-
-          if(ix!==-1){
-            loc[ix]=r;
-            localMap.set(
-              r.id,
-              r
-            );
+    // Documentos
+    for(const id0 of S.items.map(x=>x.id)){
+      let id=id0;
+      for(let a=0;a<5;a++){
+        const l=S.items.find(x=>x.id===id);
+        if(!l)break;
+        const r=remoteI.get(id);
+        if(r){
+          if((l.updated||0)>(r.updated||0)){
+            const {error}=await sb.from('items').update(row(l)).eq('id',id).eq('user_id',owner);
+            chk();
+            if(error)throw error;
+            remoteI.set(id,{...l,user_id:owner});
           }
+          break;
         }
-      });
-
-      // ------------------------------------------------------
-      // 2. LOCAL -> REMOTO
-      // ------------------------------------------------------
-
-      const remote=
-        new Map(
-          rows.map(r=>[r.id,r])
-        );
-
-      for(
-        let n=0;
-        n<loc.length;
-        n++
-      ){
-
-        let l=loc[n];
-        let r=remote.get(l.id);
-
-        // ----------------------------------------------------
-        // No existe remotamente
-        // ----------------------------------------------------
-
-        if(!r){
-
-          let saved=false;
-
-          for(
-            let attempt=0;
-            attempt<5&&!saved;
-            attempt++
-          ){
-
-            const {
-              error:e
-            }=await sb
-              .from(t)
-              .insert({
-                ...l,
-                user_id:owner,
-                del:!!l.del
-              });
-
-            if(!e){
-              saved=true;
-
-              remote.set(
-                l.id,
-                {
-                  ...l,
-                  user_id:owner
-                }
-              );
-
-              break;
-            }
-
-            // Solo una colisión real
-            // de ID genera otro ID.
-            if(e.code!=='23505'){
-              throw e;
-            }
-
-            const oldId=l.id;
-            const newId=uid();
-
-            // Conservar PDF local
-            // si hay que cambiar su ID.
-            if(l.type==='pdf'){
-              const b=
-                await pdfGet(oldId);
-
-              if(b){
-                await pdfPut(
-                  newId,
-                  b
-                );
-              }
-            }
-
-            l={
-              ...l,
-              id:newId,
-              updated:Date.now()
-            };
-
-            loc[n]=l;
-
-            // Actualizar reseñas.
-            const {
-              error:re
-            }=await sb
-              .from('reviews')
-              .update({
-                item_id:newId
-              })
-              .eq(
-                'item_id',
-                oldId
-              )
-              .eq(
-                'user_id',
-                owner
-              );
-
-            if(re)throw re;
-          }
-
-          if(!saved){
-            throw new Error(
-              'No se pudo guardar el documento.'
-            );
-          }
-
-        }else{
-
-          // --------------------------------------------------
-          // Local más nuevo -> remoto
-          // --------------------------------------------------
-
-          if(
-            (l.updated||0)>
-            (r.updated||0)
-          ){
-
-            const {
-              error:e
-            }=await sb
-              .from(t)
-              .update({
-                ...l,
-                user_id:owner,
-                del:!!l.del
-              })
-              .eq(
-                'id',
-                l.id
-              );
-
-            if(e)throw e;
-
-            remote.set(
-              l.id,
-              {
-                ...l,
-                user_id:owner
-              }
-            );
-          }
+        const {error}=await sb.from('items').insert(row(l));
+        chk();
+        if(!error){remoteI.set(id,{...l,user_id:owner});break}
+        if(error.code!=='23505')throw error;
+        const ex=await mine('items',id);
+        if(ex){remoteI.set(id,ex);continue}
+        // Colisión real: nuevo id, conservar PDF local y reseñas
+        const nid=uid();
+        if(l.type==='pdf'){
+          const b=await pdfGet(id);
+          chk();
+          if(b){await pdfPut(nid,b);chk()}
         }
+        const {error:re}=await sb.from('reviews').update({item_id:nid}).eq('item_id',id).eq('user_id',owner);
+        chk();
+        if(re)throw re;
+        l.id=nid;l.updated=Date.now();
+        id=nid;
+      }
 
-        // ----------------------------------------------------
-        // PDF -> STORAGE
-        // ----------------------------------------------------
-
-        l=loc[n];
-
-        if(
-          l.type==='pdf' &&
-          !l.del
-        ){
-          const flag=
-            'slpdf_'+
-            owner+
-            '_'+
-            l.id;
-
-          if(
-            !localStorage.getItem(flag)
-          ){
-            const b=
-              await getBlob(l.id);
-
-            if(b){
-
-              const {
-                error:pe
-              }=await sb.storage
-                .from('pdfs')
-                .upload(
-                  `${owner}/${l.id}.pdf`,
-                  b,
-                  {
-                    upsert:true,
-                    contentType:
-                      'application/pdf'
-                  }
-                );
-
-              if(pe)throw pe;
-
-              localStorage.setItem(
-                flag,
-                '1'
-              );
-            }
+      // PDF -> Storage (solo si existe el archivo local)
+      const l=S.items.find(x=>x.id===id);
+      if(l&&l.type==='pdf'&&!l.del){
+        const flag='slpdf_'+owner+'_'+l.id;
+        if(!localStorage.getItem(flag)){
+          const b=await pdfGet(l.id);
+          chk();
+          if(b){
+            const {error:pe}=await sb.storage.from('pdfs').upload(`${owner}/${l.id}.pdf`,b,{upsert:true,contentType:'application/pdf'});
+            chk();
+            if(pe)throw pe;
+            localStorage.setItem(flag,'1');
           }
         }
       }
     }
 
-    // ========================================================
-    // GUARDAR ESTADO FINAL LOCAL
-    // ========================================================
+    // ---------- 4. guardar y refrescar ----------
+    chk();
+    localStorage.setItem('sl1_'+owner,JSON.stringify(S));
 
-    localStorage.setItem(
-      'sl1_'+owner,
-      JSON.stringify(S)
-    );
-
-    // Si estamos dentro de un documento,
-    // conservarlo actualizado.
     if(doc){
-
-      const currentId=doc.id;
-
-      doc=
-        S.items.find(
-          i=>i.id===currentId
-        )||null;
-
+      const nd=S.items.find(i=>i.id===doc.id);
+      if(!nd||nd.del){
+        doc=null;
+        home();
+      }else{
+        const replaced=nd!==doc;
+        doc=nd;
+        if(replaced&&prev&&(nd.html!==prev.html||nd.updated!==prev.updated)){
+          if(doc.type==='pdf'){renderOv();paint()}
+          else{ed.innerHTML=doc.html||'';norm();paint()}
+        }
+      }
     }else{
-
-      // MUY IMPORTANTE:
-      // al entrar desde otro navegador,
-      // aquí se vuelve a pintar la pantalla
-      // con las carpetas/documentos recién
-      // descargados de Supabase.
       home();
     }
-
-    $('#st').textContent=
-      'Sincronizado';
+    $('#st').textContent='Sincronizado';
 
   }catch(e){
-
-    console.error(
-      'Error de sincronización:',
-      e
-    );
-
-    $('#st').textContent=
-      'Error de sincronización';
-
+    if(e!==STALE){
+      console.error('Error de sincronización:',e);
+      if(g===gen)$('#st').textContent='Error de sincronización';
+    }
   }finally{
-
-    syncing=false;
+    if(syncing===g)syncing=false;
+    if(pending&&g===gen&&user&&user.id===owner){
+      pending=false;
+      setTimeout(sync,0);
+    }
   }
 }
 
