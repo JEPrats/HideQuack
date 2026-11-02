@@ -181,63 +181,53 @@ ed.addEventListener('input',()=>{norm();ed.querySelectorAll('.card,.cm').forEach
  const s=getSelection(),n=s.anchorNode,o=s.anchorOffset;
  if(n&&n.nodeType===3&&n.parentNode===L&&n===L.firstChild&&o===3&&/^-[1-6][ \u00a0]$/.test(n.data.slice(0,3))){
   setL(L,'h',+n.data[1]);n.data=n.data.slice(3);if(!n.data){L.innerHTML='<br>';put(L)}else{const r=document.createRange();r.setStart(n,0);r.collapse(true);s.removeAllRanges();s.addRange(r)}return save()}
- // Abrir ocultamiento escribiendo "< "
-if(n&&n.nodeType===3&&o>=2&&n.data.slice(o-2,o)==='< '&&!n.parentElement.closest('.card')){
-  const sp=document.createElement('span');
-  sp.className='card';
-  sp.dataset.id=uid();
+ // Ocultar cuando se completa: < texto <
+if(n && n.nodeType === 3){
+  const text = n.data;
+  const pos = o;
 
-  const before=n.data.slice(0,o-2);
-  const after=n.data.slice(o);
-  const z=document.createTextNode('\u200b');
-  const tail=document.createTextNode(after);
+  // Buscar el último "<" escrito antes del cursor
+  const start = text.lastIndexOf('<', pos - 1);
 
-  sp.append(z);
+  if(start !== -1){
+    // El segundo "<" debe ser exactamente el que acabamos de escribir
+    if(text[pos - 1] === '<' && start < pos - 1){
 
-  if(before){
-    n.data=before;
-    n.after(sp,tail);
-  }else{
-    n.replaceWith(sp,tail);
+      const hidden = text.slice(start + 1, pos - 1);
+
+      if(hidden.trim()){
+        const before = text.slice(0, start);
+        const after = text.slice(pos);
+
+        const card = document.createElement('span');
+        card.className = 'card';
+        card.dataset.id = uid();
+        card.textContent = hidden;
+
+        const tail = document.createTextNode(after);
+
+        if(before){
+          n.data = before;
+          n.after(card, tail);
+        }else{
+          n.replaceWith(card, tail);
+        }
+
+        // El cursor queda justo después del ocultamiento
+        const r = document.createRange();
+        r.setStart(tail, 0);
+        r.collapse(true);
+
+        s.removeAllRanges();
+        s.addRange(r);
+
+        paint();
+        save();
+        return;
+      }
+    }
   }
-
-  const r=document.createRange();
-  r.setStart(z,1);
-  r.collapse(true);
-  s.removeAllRanges();
-  s.addRange(r);
-  paint();
-  return save();
 }
-
-// Cerrar ocultamiento escribiendo "<"
-const inside=n&&n.nodeType===3?n.parentElement.closest('.card'):null;
-if(inside&&n.data.slice(o-1,o)==='<'){
-  const before=n.data.slice(0,o-1);
-  const after=n.data.slice(o);
-  const tail=document.createTextNode(after);
-
-  if(before)n.data=before;
-  else n.remove();
-
-  inside.after(tail);
-
-  const r=document.createRange();
-  r.setStart(tail,0);
-  r.collapse(true);
-  s.removeAllRanges();
-  s.addRange(r);
-  paint();
-  return save();
-}
- if(n&&n.nodeType===3&&o>=2&&n.data.slice(o-2,o)==='++'){const cd=n.parentElement.closest('.card');
-  if(cd&&!cd.querySelector('.cm')){n.data=n.data.slice(0,o-2)+n.data.slice(o);const cm=document.createElement('span');cm.className='cm';cm.textContent='\u200b';cd.append(cm);
-   const r=document.createRange();r.setStart(cm.firstChild,1);r.collapse(true);s.removeAllRanges();s.addRange(r)}}
- save()});
-ed.addEventListener('paste',e=>{if(ed.contentEditable==='false')return;e.preventDefault();const im=[...(e.clipboardData.items||[])].find(x=>x.type.startsWith('image/'));if(im){addImage(im.getAsFile());return}
- const ls=(e.clipboardData.getData('text/plain')||'').replace(/\r/g,'').split('\n');document.execCommand('insertText',false,ls[0]);
- let L=curLine();ls.slice(1).forEach(x=>{const N=mk(x?'b':'e',0,x?esc(x):'');L.after(N);L=N});put(L,true);save()});
-ed.addEventListener('drop',e=>e.preventDefault());
 // ---- Ocultar selección ----
 function hideSel(){doc.type==='pdf'?hideSelPdf():hideSelText()}
 function hideSelText(){const s=getSelection();if(!s.rangeCount||s.isCollapsed)return toast('Selecciona primero un texto');
