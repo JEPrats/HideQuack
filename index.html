@@ -184,46 +184,48 @@ ed.addEventListener('input',()=>{norm();ed.querySelectorAll('.card,.cm').forEach
  // Ocultar cuando se completa: < texto <
 if(n && n.nodeType === 3){
   const text = n.data
-  // Ocultar SOLO cuando se completa: < texto <
-if(n && n.nodeType===3){
-  const text=n.data;
-  const pos=o;
+// Ocultar automáticamente solo con: < texto <
+if(n && n.nodeType === 3){
+  const text = n.data;
+  const pos = o;
 
-  // El carácter que acabamos de escribir DEBE ser "<"
-  if(pos>0 && text[pos-1]==='<'){
+  // Solo actuamos cuando acabamos de escribir el segundo "<"
+  if(pos > 0 && text[pos - 1] === '<'){
 
-    // Buscar el PRIMER "<" hacia atrás,
-    // pero sin poder ser el mismo "<" que acabamos de escribir
-    const start=text.lastIndexOf('<',pos-2);
+    // Buscar un "<" anterior al que acabamos de escribir
+    const start = text.lastIndexOf('<', pos - 2);
 
-    // Si no existe un "<" anterior, no hacemos absolutamente nada
-    if(start!==-1){
+    // Si no hay un primer "<", este "<" no hace nada
+    if(start !== -1){
 
-      const hidden=text.slice(start+1,pos-1);
+      // Texto situado entre los dos "<"
+      const hidden = text.slice(start + 1, pos - 1);
 
-      // Debe haber texto entre los dos "<"
+      // Tiene que existir contenido real entre ambos
       if(hidden.trim()){
 
-        const before=text.slice(0,start);
-        const after=text.slice(pos);
+        const before = text.slice(0, start);
+        const after = text.slice(pos);
 
-        const card=document.createElement('span');
-        card.className='card';
-        card.dataset.id=uid();
-        card.textContent=hidden;
+        // Crear la tarjeta SOLO ahora, al escribir el segundo "<"
+        const card = document.createElement('span');
+        card.className = 'card';
+        card.dataset.id = uid();
+        card.textContent = hidden;
 
-        const tail=document.createTextNode(after);
+        // Todo lo que haya después del segundo "<" queda fuera
+        const tail = document.createTextNode(after);
 
         if(before){
-          n.data=before;
-          n.after(card,tail);
+          n.data = before;
+          n.after(card, tail);
         }else{
-          n.replaceWith(card,tail);
+          n.replaceWith(card, tail);
         }
 
-        // Cursor justo después del ocultamiento
-        const r=document.createRange();
-        r.setStart(tail,0);
+        // Cursor fuera de la tarjeta
+        const r = document.createRange();
+        r.setStart(tail, 0);
         r.collapse(true);
 
         s.removeAllRanges();
