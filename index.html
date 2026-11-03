@@ -88,12 +88,20 @@ dialog input{border:1px solid var(--ln);border-radius:8px;background:var(--pp);c
 #pp{width:240px}#ptx{width:100%;font:inherit;font-size:.9rem;background:var(--pp);color:var(--tx);border:1px solid var(--ln);border-radius:8px;padding:.4rem;resize:vertical}#pdel{width:100%;margin-top:.3rem}
 #map,#fmap{position:relative;overflow:hidden;height:72vh;touch-action:none;cursor:grab;border:1px solid var(--ln);border-radius:12px}
 #mapin,#fmapin{position:absolute;left:0;top:0;transform-origin:0 0;width:max-content;user-select:none;-webkit-user-select:none}
-.fm{margin-bottom:2.5rem}.fn{font:600 1rem Georgia,serif;margin-bottom:.6rem;cursor:pointer}
-.seg{display:inline-flex;border:1px solid var(--ln);border-radius:999px;overflow:hidden}
-.seg button{border:0;border-radius:0;padding:.35rem .9rem}.seg button.on{background:var(--ne);color:var(--tx);font-weight:600}.mn{display:flex;align-items:center}
-.mt{border:1px solid var(--ln);background:var(--ne);border-radius:8px;padding:.35rem .7rem;max-width:260px;font:.95rem Georgia,serif;cursor:pointer}.mt.hid{color:transparent;min-width:3.5em;user-select:none;-webkit-user-select:none}
 
-.mc{display:flex;flex-direction:column;gap:.5rem;margin-left:1.2rem;padding-left:1rem;border-left:1px solid var(--mut)}.mc.root{margin:0;padding:0;border:0}
+.seg{display:inline-flex;border:1px solid var(--ln);border-radius:999px;overflow:hidden}
+.seg button{border:0;border-radius:0;padding:.35rem .9rem}.seg button.on{background:var(--ne);color:var(--tx);font-weight:600}
+
+
+
+#map,#fmap{background-image:radial-gradient(circle,var(--ln) 1px,transparent 1px);background-size:28px 28px}
+.mw{position:relative}.me{position:absolute;left:0;top:0;overflow:visible;pointer-events:none}
+.nb{position:absolute;box-sizing:border-box;display:flex;align-items:center;justify-content:center;text-align:center;padding:4px 12px;border-radius:12px;background:#f3ede4;color:var(--tx);border:2px solid var(--ln);box-shadow:0 2px 8px #0001;font:500 13px/1.3 system-ui,-apple-system,"Segoe UI",sans-serif;cursor:pointer;transition:transform .15s,box-shadow .15s}
+.nb:hover{transform:translateY(-2px);box-shadow:0 8px 24px #0002}
+.nb.d1{font-weight:600}.nb.d2{font-size:12px}
+.mr{background:#3a4f5a;color:#fff;border-color:#ffffff26;font:600 17px/1.3 Georgia,serif;padding:8px 20px;cursor:default}.mr:hover{transform:none}
+.nt{display:block;overflow-wrap:anywhere}
+.mt.hid .nt{filter:blur(6px);opacity:.55;user-select:none;-webkit-user-select:none}
 </style></head><body>
 
 <header>
@@ -2680,6 +2688,12 @@ function pz(vp,inn){
   let moved=false,pd=0,pm=null;
   const ap=()=>{inn.style.transform=`translate(${st.x}px,${st.y}px) scale(${st.k})`};
   st.reset=()=>{st.x=24;st.y=24;st.k=1;ap()};
+  st.fit=(W,H)=>{ // encaja todo el mapa en la pantalla al abrirlo
+    const w=vp.clientWidth,h=vp.clientHeight;
+    if(!w||!h||!W)return st.reset();
+    const k=Math.max(.35,Math.min(1,(w-48)/W,(h-48)/H));
+    st.k=k;st.x=Math.max(24,(w-W*k)/2);st.y=Math.max(24,(h-H*k)/2);ap();
+  };
   st.pan=(dx,dy)=>{st.x+=dx;st.y+=dy;ap()};
   st.zoom=(f,cx,cy)=>{
     const k=Math.max(.2,Math.min(3,st.k*f));
@@ -2752,19 +2766,58 @@ function buildTree(hs){ // cada encabezado cuelga del anterior más cercano de o
   });
   return root;
 }
-function treeHTML(root,open,pre){
-  const node=n=>`<div class="mn"><div class="mt${open.has(pre+n.k)?'':' hid'}" data-k="${pre}${n.k}">${esc(n.t)}</div>${n.c.length?`<div class="mc">${n.c.map(node).join('')}</div>`:''}</div>`;
-  return `<div class="mc root">${root.c.map(node).join('')}</div>`;
+// ---- Dibujo del mapa: nodos redondeados unidos por curvas, de izquierda a derecha ----
+function nodeSize(n){
+  const f=n.kind==='r'?17:13,cw=f*.56,maxW=n.kind==='r'?280:230,chars=[...n.t].length;
+  const w=Math.min(maxW,Math.max(n.kind==='r'?120:70,Math.ceil(chars*cw)+40));
+  const lines=Math.max(1,Math.ceil(chars*cw/(w-40)));
+  return {w,h:Math.max(n.kind==='r'?48:38,Math.round(lines*f*1.35+18))};
 }
+function layoutTree(root){
+  const HG=64,VG=16,cols=[];
+  (function sz(n,d){n.d=d;Object.assign(n,nodeSize(n));cols[d]=Math.max(cols[d]||0,n.w);n.c.forEach(c=>sz(c,d+1))})(root,0);
+  const xs=[];let acc=0;
+  cols.forEach((w,i)=>{xs[i]=acc;acc+=w+HG});
+  let cur=0;
+  (function pos(n){
+    n.x=xs[n.d];
+    if(!n.c.length){n.y=cur;cur+=n.h+VG;return}
+    n.c.forEach(pos);
+    const a=n.c[0],b=n.c[n.c.length-1];
+    n.y=(a.y+a.h/2+b.y+b.h/2)/2-n.h/2;      // el padre queda centrado respecto a sus hijos
+  })(root);
+  const all=[];(function col(n){all.push(n);n.c.forEach(col)})(root);
+  const minY=Math.min(...all.map(n=>n.y)),maxY=Math.max(...all.map(n=>n.y+n.h));
+  all.forEach(n=>{n.y-=minY});
+  return {all,W:acc-HG,H:maxY-minY};
+}
+function mapHTML(root,open){
+  const L=layoutTree(root);let paths='';
+  L.all.forEach(p=>p.c.forEach(c=>{
+    const x1=p.x+p.w,y1=p.y+p.h/2,x2=c.x,y2=c.y+c.h/2,mx=(x1+x2)/2;
+    paths+=`<path d="M${x1} ${y1}C${mx} ${y1} ${mx} ${y2} ${x2} ${y2}" fill="none" stroke="rgba(100,80,60,${(.3-Math.min(p.d,3)*.05).toFixed(2)})" stroke-width="${Math.max(1.2,2-p.d*.4).toFixed(1)}"/>`;
+  }));
+  const nodes=L.all.map(n=>{
+    const st=`left:${n.x}px;top:${n.y}px;width:${n.w}px;height:${n.h}px`;
+    if(n.kind==='r')return `<div class="nb mr" style="${st}"><span class="nt">${esc(n.t)}</span></div>`;
+    if(n.kind==='f')return `<div class="nb fn d1" data-id="${n.id}" style="${st}"><span class="nt">${esc(n.t)}</span></div>`;
+    return `<div class="nb mt d${Math.min(n.d,2)}${open.has(n.key)?'':' hid'}" data-k="${n.key}" style="${st}"><span class="nt">${esc(n.t)}</span></div>`;
+  }).join('');
+  return {html:`<div class="mw" style="width:${L.W}px;height:${L.H}px"><svg class="me" width="${L.W}" height="${L.H}">${paths}</svg>${nodes}</div>`,W:L.W,H:L.H};
+}
+const conv=(n,pre)=>({t:n.t,kind:'h',key:pre+n.k,c:n.c.map(x=>conv(x,pre))});
 function renderMap(){
-  const root=buildTree(headingsList());
-  $('#mapin').innerHTML=root.c.length?treeHTML(root,mapOpen,''):'<p class="empty">Aún no hay encabezados. Márcalos con Alt+1 … Alt+6.</p>';
+  const tree=buildTree(headingsList());
+  if(!tree.c.length){$('#mapin').innerHTML='<p class="empty">Aún no hay encabezados. Márcalos con Alt+1 … Alt+6.</p>';return {W:0,H:0}}
+  const m=mapHTML({t:doc.name,kind:'r',c:tree.c.map(x=>conv(x,''))},mapOpen);
+  $('#mapin').innerHTML=m.html;
+  return m;
 }
 $('#map').addEventListener('click',e=>{
   const t=e.target.closest('.mt');if(!t)return;
   const k=t.dataset.k;
   mapOpen.has(k)?mapOpen.delete(k):mapOpen.add(k);
-  renderMap();
+  t.classList.toggle('hid',!mapOpen.has(k));
 });
 function setView(v){
   view=v;
@@ -2774,7 +2827,7 @@ function setView(v){
   if(map){
     ed.hidden=true;$('#pages').hidden=true;$('#map').hidden=false;
     ['#tm','#bi','#bc','#sf','#br'].forEach(q=>$(q).hidden=true);
-    mapOpen=new Set();dpz.reset();renderMap();
+    mapOpen=new Set();dpz.reset();{const z=renderMap();dpz.fit(z.W,z.H)}
   }else{
     $('#map').hidden=true;$('#tm').hidden=false;setMode(mode);
   }
@@ -2794,11 +2847,11 @@ function folderMap(fid){
   $('#ftitle').textContent='Mapa · '+f.name;
   fOpen=new Set();fpz.reset();
   const its=vi().filter(i=>i.folder===fid);
-  $('#fmapin').innerHTML=its.length?its.map((i,n)=>{
-    const root=buildTree(hsOf(i));
-    return `<div class="fm"><div class="fn" data-id="${i.id}">${i.type==='pdf'?'📕':'📄'} ${esc(i.name)}</div>`+
-      (root.c.length?treeHTML(root,fOpen,n+'_'):'<div class="mt" style="cursor:default;color:var(--mut)">Sin encabezados</div>')+'</div>';
-  }).join(''):'<p class="empty">Esta carpeta no tiene archivos.</p>';
+  if(!its.length){$('#fmapin').innerHTML='<p class="empty">Esta carpeta no tiene archivos.</p>';return}
+  const root={t:f.name,kind:'r',c:its.map((i,n)=>({t:i.name,kind:'f',id:i.id,key:'f'+n,c:buildTree(hsOf(i)).c.map(x=>conv(x,n+'_'))}))};
+  const m=mapHTML(root,fOpen);
+  $('#fmapin').innerHTML=m.html;
+  fpz.fit(m.W,m.H);
 }
 $('#fmap').addEventListener('click',e=>{
   const t=e.target.closest('.mt');
