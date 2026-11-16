@@ -281,27 +281,10 @@ const vf=()=>S.folders.filter(f=>!f.del);
 const vi=()=>S.items.filter(i=>!i.del);
 
 const persist=()=>{
-  const storageKey=stateOwner?'sl1_'+stateOwner:'sl1';
-  // Garantiza una marca estrictamente creciente cuando cambia el contenido
-  // de un registro, incluso si dos guardados ocurren en el mismo milisegundo.
-  try{
-    const previous=JSON.parse(localStorage.getItem(storageKey)||'null');
-    if(previous){
-      ['folders','items'].forEach(key=>{
-        const old=new Map((previous[key]||[]).map(x=>[x.id,x]));
-        S[key].forEach(x=>{
-          const p=old.get(x.id);
-          if(!p)return;
-          const a={...p},b={...x};
-          delete a.updated;delete b.updated;
-          if(JSON.stringify(a)!==JSON.stringify(b)){
-            x.updated=Math.max(Number(x.updated)||0,(Number(p.updated)||0)+1);
-          }
-        });
-      });
-    }
-  }catch(e){console.warn('No se pudo comparar la versión local anterior:',e)}
-  localStorage.setItem(storageKey,JSON.stringify(S));
+  localStorage.setItem(
+    stateOwner?'sl1_'+stateOwner:'sl1',
+    JSON.stringify(S)
+  );
   schedSync();
 };
 
@@ -2503,6 +2486,21 @@ bar.onclick=e=>{
       k.due=Date.now();
     }
 
+    if(
+      sb &&
+      user
+    ){
+      sb
+        .from('reviews')
+        .insert({
+          user_id:user.id,
+          item_id:doc.id,
+          card_id:id,
+          result:res,
+          at:Date.now()
+        })
+        .then(()=>{});
+    }
   }
 
   doc.cards[id]=k;
@@ -2617,13 +2615,11 @@ if(
 }
 
 function schedSync(){
-  // Los cambios se guardan localmente al instante.
-  // La sincronización automática con Supabase se realiza cada 10 minutos.
+  clearTimeout(tm);
+  if(user){
+    tm=setTimeout(sync,2500);
+  }
 }
-
-setInterval(()=>{
-  if(user)sync();
-},600000);
 
 // ============================================================
 // SELECCIÓN: menú flotante, encabezados (Alt+1..6), posits (Alt+P) y MAPA
@@ -3638,194 +3634,192 @@ async function splitPdf(k){
 document.addEventListener('visibilitychange',()=>{if(!document.hidden&&user)sync()});  // al volver a la pestaña se traen los cambios de otros dispositivos
 
 // ============================================================
-// SINCRONIZACIÓN INCREMENTAL
-// Lee el último estado por registro desde sync_changes usando un cursor local
-// por dispositivo; sube solo registros cuyo updated supera su último ACK.
+// SINCRONIZACIÓN BIDIRECCIONAL (fusión por id)
+//
+//  1. Descarga las filas remotas del usuario (no toca S).
+//  2. Fusiona remoto -> local en un bloque SIN awaits:
+//       solo remoto  -> se incorpora
+//       ambos        -> gana el de `updated` mayor (empate: remoto)
+//  3. Sube local -> remoto (inserta lo que falta, actualiza si local es más nuevo).
+//  4. Cada await comprueba que la sesión sigue siendo la misma (gen/user);
+//     si cambió, la operación se abandona sin tocar S, la UI ni localStorage.
 // ============================================================
 
-async function pullChanges(owner,chk,ack){
-  let cursor=Number(localStorage.getItem('slcursor_'+owner)||0);
-  for(;;){
-    const {data,error}=await sb.from('sync_changes')
-      .select('seq,table_name,row_id,operation,payload')
+async function fetchAll(t,owner,chk){
+  const out=[];
+  for(let a=0;;a+=500){
+    const {data,error}=await sb
+      .from(t)
+      .select('*')
       .eq('user_id',owner)
-      .gt('seq',cursor)
-      .order('seq',{ascending:true})
-      .limit(500);
+      .order('id')
+      .range(a,a+499);
     chk();
     if(error)throw error;
-    if(!data||!data.length)break;
-    // Captura cualquier edición que haya ocurrido mientras esperaba la consulta.
-    if(dirty&&doc)flush();
-
-    for(const c of data){
-      const key=c.table_name==='folders'?'folders':c.table_name==='items'?'items':null;
-      if(!key||!c.payload)continue;
-      const remote={...c.payload};
-      delete remote.user_id;
-      const list=S[key];
-      const at=list.findIndex(x=>x.id===remote.id);
-      if(at<0){
-        list.push(remote);
-        ack[key][remote.id]=remote.updated||0;
-      }else{
-        const local=list[at];
-        if((remote.updated||0)>=(local.updated||0)){
-          list[at]=remote;
-          ack[key][remote.id]=remote.updated||0;
-        }
-      }
-    }
-    cursor=Number(data[data.length-1].seq);
-    localStorage.setItem('sl1_'+owner,JSON.stringify(S));
-    localStorage.setItem('slack_'+owner,JSON.stringify(ack));
-    localStorage.setItem('slcursor_'+owner,String(cursor));
+    out.push(...(data||[]));
+    if(!data||data.length<500)break;
   }
-  return cursor;
+  return out;
 }
 
 async function sync(){
   if(!sb||!user)return;
-  const g=gen,owner=user.id;
+
+  const g=gen;
+  const owner=user.id;
+
+  // Ya hay una sincronización de ESTA sesión: encolar otra al terminar.
   if(syncing===g){pending=true;return}
-  syncing=g;pending=false;
+  syncing=g;
+  pending=false;
+
   const STALE=new Error('sesión cambiada');
   const chk=()=>{
     if(g!==gen||!user||user.id!==owner)throw STALE;
   };
   const row=l=>({...l,user_id:owner,del:!!l.del});
   const clean=r=>{const {user_id,...x}=r;return x};
-  const readAck=()=>{
-    try{
-      const a=JSON.parse(localStorage.getItem('slack_'+owner)||'{}');
-      return {folders:a.folders||{},items:a.items||{}};
-    }catch(_){return {folders:{},items:{}}}
-  };
-  const ack=readAck();
 
   $('#st').textContent='Sincronizando…';
-  try{
-    if(dirty&&doc)flush();
 
-    // 1. Descargar únicamente los cambios posteriores al cursor de este dispositivo.
-    await pullChanges(owner,chk,ack);
+  try{
+    // ---------- 1. descargar (solo lectura) ----------
+    const rf=await fetchAll('folders',owner,chk);
+    const ri=await fetchAll('items',owner,chk);
     chk();
 
-    // 2. Subir únicamente registros cuyo updated haya cambiado desde su último ACK.
-    const pushTable=async(t,key)=>{
-      const list=S[key];
-      const candidates=list.map(x=>x.id);
-      for(const originalId of candidates){
-        let id=originalId;
-        for(let attempt=0;attempt<5;attempt++){
-          const local=list.find(x=>x.id===id);
-          if(!local)break;
-          const known=Number(ack[key][id]||0);
-          if((local.updated||0)<=known)break;
+    // ---------- 2. fusionar remoto -> local (síncrono) ----------
+    if(dirty&&doc)flush(); // ediciones aún no volcadas: que compitan con su fecha real
+    const prev=doc?{id:doc.id,html:doc.html,updated:doc.updated}:null;
+    const merge=(loc,rows)=>{
+      rows.forEach(raw=>{
+        const r=clean(raw);
+        const i=loc.findIndex(x=>x.id===r.id);
+        if(i<0)loc.push(r);
+        else if((r.updated||0)>=(loc[i].updated||0))loc[i]=r;
+      });
+    };
+    merge(S.folders,rf);
+    merge(S.items,ri);
 
-          const {data:existing,error:se}=await sb.from(t).select('*')
-            .eq('id',id).eq('user_id',owner).maybeSingle();
-          chk();
-          if(se)throw se;
+    // ---------- 3. subir local -> remoto ----------
+    const remoteF=new Map(rf.map(r=>[r.id,r]));
+    const remoteI=new Map(ri.map(r=>[r.id,r]));
 
-          if(existing){
-            const remote=clean(existing);
-            if((local.updated||0)>(remote.updated||0)){
-              const outgoing={...local};
-              const {data:changed,error}=await sb.from(t).update(row(outgoing))
-                .eq('id',id).eq('user_id',owner).eq('updated',remote.updated)
-                .select('id');
-              chk();
-              if(error)throw error;
-              // Control optimista: si otro dispositivo ganó la carrera, volver a leer.
-              if(!changed||!changed.length)continue;
-              ack[key][id]=outgoing.updated||0;
-            }else{
-              const at=list.findIndex(x=>x.id===id);
-              if(at>=0)list[at]=remote;
-              ack[key][id]=remote.updated||0;
-            }
-            break;
-          }
-
-          const outgoing={...local};
-          const {error:ie}=await sb.from(t).insert(row(outgoing));
-          chk();
-          if(!ie){
-            ack[key][id]=outgoing.updated||0;
-            break;
-          }
-          if(ie.code!=='23505')throw ie;
-
-          // Un id ocupado por otra cuenta: regenerarlo sin perder referencias ni el PDF local.
-          const nid=uid(),now=Date.now();
-          if(key==='folders'){
-            local.id=nid;local.updated=now;
-            S.items.forEach(it=>{
-              if(it.folder===id){it.folder=nid;it.updated=now}
-            });
-            if(cur===id)cur=nid;
-          }else{
-            if(local.type==='pdf'){
-              const blob=await pdfGet(id);
-              chk();
-              if(blob)await pdfPut(nid,blob);
-            }
-            local.id=nid;local.updated=now;
-            const oldFlag='slpdf_'+owner+'_'+id;
-            localStorage.removeItem(oldFlag);
-          }
-          id=nid;
-        }
-        const remaining=list.find(x=>x.id===id);
-        if(remaining&&(remaining.updated||0)>Number(ack[key][id]||0)){
-          throw new Error('No se pudo completar la sincronización de '+key+'. Se reintentará.');
-        }
-      }
+    // Comprueba si una fila propia con ese id ya existe (carrera entre dispositivos)
+    const mine=async(t,id)=>{
+      const {data,error}=await sb.from(t).select('id,updated').eq('id',id).eq('user_id',owner);
+      chk();
+      if(error)throw error;
+      return (data||[])[0]||null;
     };
 
-    await pushTable('folders','folders');
-    await pushTable('items','items');
-
-    // 3. Subir PDFs locales aún no presentes en Storage. Las descargas siguen siendo bajo demanda.
-    for(const l of S.items){
-      chk();
-      if(l.type!=='pdf'||l.del)continue;
-      const flag='slpdf_'+owner+'_'+l.id;
-      if(localStorage.getItem(flag))continue;
-      const blob=await pdfGet(l.id);
-      chk();
-      if(blob){
-        const {error}=await sb.storage.from('pdfs')
-          .upload(`${owner}/${l.id}.pdf`,blob,{upsert:true,contentType:'application/pdf'});
+    // Carpetas
+    for(const id0 of S.folders.map(x=>x.id)){
+      let id=id0;
+      for(let a=0;a<5;a++){
+        const l=S.folders.find(x=>x.id===id);
+        if(!l)break;
+        const r=remoteF.get(id);
+        if(r){
+          if((l.updated||0)>(r.updated||0)){
+            const {error}=await sb.from('folders').update(row(l)).eq('id',id).eq('user_id',owner);
+            chk();
+            if(error)throw error;
+            remoteF.set(id,{...l,user_id:owner});
+          }
+          break;
+        }
+        const {error}=await sb.from('folders').insert(row(l));
         chk();
-        if(error)throw error;
-        localStorage.setItem(flag,'1');
+        if(!error){remoteF.set(id,{...l,user_id:owner});break}
+        if(error.code!=='23505')throw error;      // RLS u otro error: NO es colisión
+        const ex=await mine('folders',id);
+        if(ex){remoteF.set(id,ex);continue}       // era nuestra: actualizar en la vuelta siguiente
+        // Colisión real (el id pertenece a otra cuenta): nuevo id + referencias
+        const nid=uid(),now=Date.now();
+        l.id=nid;l.updated=now;
+        S.items.forEach(i=>{if(i.folder===id){i.folder=nid;i.updated=now}});
+        if(cur===id)cur=nid;
+        id=nid;
       }
     }
 
-    // 4. Recoger también los cambios que hayan entrado mientras subíamos.
-    await pullChanges(owner,chk,ack);
+    // Documentos
+    for(const id0 of S.items.map(x=>x.id)){
+      let id=id0;
+      for(let a=0;a<5;a++){
+        const l=S.items.find(x=>x.id===id);
+        if(!l)break;
+        const r=remoteI.get(id);
+        if(r){
+          if((l.updated||0)>(r.updated||0)){
+            const {error}=await sb.from('items').update(row(l)).eq('id',id).eq('user_id',owner);
+            chk();
+            if(error)throw error;
+            remoteI.set(id,{...l,user_id:owner});
+          }
+          break;
+        }
+        const {error}=await sb.from('items').insert(row(l));
+        chk();
+        if(!error){remoteI.set(id,{...l,user_id:owner});break}
+        if(error.code!=='23505')throw error;
+        const ex=await mine('items',id);
+        if(ex){remoteI.set(id,ex);continue}
+        // Colisión real: nuevo id, conservar PDF local y reseñas
+        const nid=uid();
+        if(l.type==='pdf'){
+          const b=await pdfGet(id);
+          chk();
+          if(b){await pdfPut(nid,b);chk()}
+        }
+        const {error:re}=await sb.from('reviews').update({item_id:nid}).eq('item_id',id).eq('user_id',owner);
+        chk();
+        if(re)throw re;
+        l.id=nid;l.updated=Date.now();
+        id=nid;
+      }
+
+      // PDF -> Storage (solo si existe el archivo local)
+      const l=S.items.find(x=>x.id===id);
+      if(l&&l.type==='pdf'&&!l.del){
+        const flag='slpdf_'+owner+'_'+l.id;
+        if(!localStorage.getItem(flag)){
+          const b=await pdfGet(l.id);
+          chk();
+          if(b){
+            const {error:pe}=await sb.storage.from('pdfs').upload(`${owner}/${l.id}.pdf`,b,{upsert:true,contentType:'application/pdf'});
+            chk();
+            if(pe)throw pe;
+            localStorage.setItem(flag,'1');
+          }
+        }
+      }
+    }
+
+    // ---------- 4. guardar y refrescar ----------
     chk();
     localStorage.setItem('sl1_'+owner,JSON.stringify(S));
-    localStorage.setItem('slack_'+owner,JSON.stringify(ack));
 
     if(doc){
-      const prev={id:doc.id,html:doc.html,updated:doc.updated};
       const nd=S.items.find(i=>i.id===doc.id);
       if(!nd||nd.del){
-        doc=null;home();
+        doc=null;
+        home();
       }else{
         const replaced=nd!==doc;
         doc=nd;
-        if(replaced&&(nd.html!==prev.html||nd.updated!==prev.updated)){
+        if(replaced&&prev&&(nd.html!==prev.html||nd.updated!==prev.updated)){
           if(doc.type==='pdf'){renderOv();paint()}
           else{ed.innerHTML=doc.html||'';norm();paint()}
         }
       }
-    }else home();
-
+    }else{
+      home();
+    }
     $('#st').textContent='Sincronizado';
+
   }catch(e){
     if(e!==STALE){
       console.error('Error de sincronización:',e);
